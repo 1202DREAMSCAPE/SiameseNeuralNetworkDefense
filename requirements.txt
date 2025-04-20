@@ -1,0 +1,12 @@
+numpy
+opencv-python
+tensorflow
+scikit-learn
+seaborn
+tqdm
+imbalanced-learn
+psutil
+matplotlib
+scikit-image
+joblib
+faiss-cpu==1.7.4
