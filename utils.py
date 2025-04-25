@@ -3,7 +3,7 @@ import numpy as np
 import cv2
 from collections import Counter
 from imblearn.over_sampling import SMOTE
-import faiss
+#import faiss
 from sklearn.metrics import (
     accuracy_score, f1_score, roc_auc_score
 )

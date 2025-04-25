@@ -3,13 +3,19 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, Model, Input, Sequential
 from tensorflow.keras.optimizers import RMSprop
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.metrics import (
+    accuracy_score, f1_score, roc_auc_score, roc_curve, confusion_matrix, silhouette_score
+)
+from scipy.optimize import brentq
+from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 import pandas as pd
 import time
 import cv2
+from SignatureDataGenerator import SignatureDataGenerator
 
-# 🔁 Simplified preprocessing
+# Preprocessing
 def preprocess_image_simple(self, img_path):
     if not isinstance(img_path, str) or not os.path.exists(img_path):
         return np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
@@ -20,12 +26,10 @@ def preprocess_image_simple(self, img_path):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = cv2.resize(img, (self.img_width, self.img_height))
         img = img.astype(np.float32) / 255.0
-        img = (img - 0.5) / 0.5
-        return img
+        return (img - 0.5) / 0.5
     except Exception:
         return np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
 
-from SignatureDataGenerator import SignatureDataGenerator
 SignatureDataGenerator.preprocess_image = preprocess_image_simple
 
 def euclidean_distance(vectors):
@@ -40,34 +44,93 @@ def get_contrastive_loss(margin=1.0):
     return contrastive_loss
 
 def create_base_network_signet(input_shape):
-    model = Sequential()
-    model.add(Input(shape=input_shape))  # ← added here
-    model.add(layers.Conv2D(96, (11,11), activation='relu', strides=(4,4)))
-    model.add(layers.BatchNormalization())
-    model.add(layers.MaxPooling2D(pool_size=(3,3), strides=(2,2)))
-    model.add(layers.ZeroPadding2D((2,2)))
-    model.add(layers.Conv2D(256, (5,5), activation='relu'))
-    model.add(layers.BatchNormalization())
-    model.add(layers.MaxPooling2D(pool_size=(3,3), strides=(2,2)))
-    model.add(layers.Dropout(0.3))
-    model.add(layers.ZeroPadding2D((1,1)))
-    model.add(layers.Conv2D(384, (3,3), activation='relu'))
-    model.add(layers.ZeroPadding2D((1,1)))
-    model.add(layers.Conv2D(256, (3,3), activation='relu'))
-    model.add(layers.MaxPooling2D(pool_size=(3,3), strides=(2,2)))
-    model.add(layers.Dropout(0.3))
-    model.add(layers.Flatten())
-    model.add(layers.Dense(1024, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0005)))
-    model.add(layers.Dropout(0.5))
-    model.add(layers.Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0005)))
+    model = Sequential([
+        Input(shape=input_shape),
+        layers.Conv2D(96, (11,11), activation='relu', strides=(4,4)),
+        layers.BatchNormalization(),
+        layers.MaxPooling2D(pool_size=(3,3), strides=(2,2)),
+        layers.ZeroPadding2D((2,2)),
+        layers.Conv2D(256, (5,5), activation='relu'),
+        layers.BatchNormalization(),
+        layers.MaxPooling2D(pool_size=(3,3), strides=(2,2)),
+        layers.Dropout(0.3),
+        layers.ZeroPadding2D((1,1)),
+        layers.Conv2D(384, (3,3), activation='relu'),
+        layers.ZeroPadding2D((1,1)),
+        layers.Conv2D(256, (3,3), activation='relu'),
+        layers.MaxPooling2D(pool_size=(3,3), strides=(2,2)),
+        layers.Dropout(0.3),
+        layers.Flatten(),
+        layers.Dense(1024, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0005)),
+        layers.Dropout(0.5),
+        layers.Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0005))
+    ])
     return model
 
+def evaluate_sop1(genuine_d, forged_d, binary_labels, distances):
+    metrics = {
+        'SOP1_Mean_Genuine': np.mean(genuine_d),
+        'SOP1_Mean_Forged': np.mean(forged_d),
+        'SOP1_Std_Genuine': np.std(genuine_d),
+        'SOP1_Std_Forged': np.std(forged_d)
+    }
+    fpr, tpr, thresholds = roc_curve(binary_labels, distances)
+    try:
+        eer_func = interp1d(fpr, tpr)
+        eer = brentq(lambda x: 1. - x - eer_func(x), 0., 1.)
+    except Exception:
+        eer = -1
+    metrics.update({
+        'SOP1_EER': eer,
+        'SOP1_AUC_ROC': roc_auc_score(binary_labels, -np.array(distances)),
+        'SOP1_Threshold': thresholds[np.argmax(tpr - fpr)]
+    })
+    hist_gen, bins = np.histogram(genuine_d, bins=30, density=True)
+    hist_forg, _ = np.histogram(forged_d, bins=bins, density=True)
+    metrics['SOP1_Overlap_Area'] = np.sum(np.minimum(hist_gen, hist_forg)) * (bins[1] - bins[0])
+    preds = [1 if d > metrics['SOP1_Threshold'] else 0 for d in distances]
+    cm = confusion_matrix(binary_labels, preds)
+    if cm.shape == (2, 2):
+        TN, FP, FN, TP = cm.ravel()
+        metrics['SOP1_FAR'] = FP / (FP + TN) if (FP + TN) != 0 else np.nan
+        metrics['SOP1_FRR'] = FN / (FN + TP) if (FN + TP) != 0 else np.nan
+    else:
+        metrics['SOP1_FAR'], metrics['SOP1_FRR'] = np.nan, np.nan
+    return metrics
 
+def evaluate_sop2(embeddings, labels, query_time):
+    metrics = {'SOP2_Time_Per_Query': query_time}
+    sample_size = min(1000, len(embeddings))
+    if sample_size > 10:
+        sample_idx = np.random.choice(len(embeddings), size=sample_size, replace=False)
+        if len(np.unique(labels[sample_idx])) > 1:
+            metrics['SOP2_Silhouette'] = silhouette_score(embeddings[sample_idx], labels[sample_idx])
+        else:
+            metrics['SOP2_Silhouette'] = -1
+        metrics['SOP2_IntraClass_Var'] = np.mean([np.var(embeddings[labels == i], axis=0).mean()
+                                                  for i in np.unique(labels)])
+    return metrics
+
+def calculate_psnr(clean_img, noisy_img):
+    mse = np.mean((clean_img * 255 - noisy_img * 255) ** 2)
+    return 20 * np.log10(255.0 / np.sqrt(mse)) if mse != 0 else float('inf')
+
+def evaluate_sop3(clean_emb, noisy_emb, clean_labels, threshold):
+    shifts = np.linalg.norm(clean_emb - noisy_emb, axis=1)
+    dists = np.array([np.min(np.linalg.norm(clean_emb[clean_labels == 0] - e, axis=1)) for e in noisy_emb])
+    preds = (dists > threshold).astype(int)
+    return {
+        'SOP3_Mean_PSNR': -1,
+        'SOP3_Accuracy_Drop': accuracy_score(clean_labels, preds),
+        'SOP3_Mean_Shift': np.mean(shifts),
+        'SOP3_Max_Shift': np.max(shifts)
+    }
+
+# ========== CONFIG ==========
 IMG_SHAPE = (155, 220, 3)
 BATCH_SIZE = 32
-EPOCHS = 20
+EPOCHS = 40
 MARGIN = 1.0
-results = []
 
 datasets = {
     "CEDAR": {
@@ -84,137 +147,140 @@ datasets = {
         "path": "Dataset/BHSig260_Hindi",
         "train_writers": list(range(101, 191)),
         "test_writers": list(range(191, 260))
-    },
+    }
 }
 
-for dataset_name, config in datasets.items():
-    print(f"\n\U0001f4e6 Processing {dataset_name}")
+results = []
 
+for dataset_name, config in datasets.items():
+    print(f"\n📦 Processing {dataset_name}")
+
+    # Data loading
     generator = SignatureDataGenerator(
         dataset={dataset_name: config},
         img_height=IMG_SHAPE[0],
         img_width=IMG_SHAPE[1],
         batch_sz=BATCH_SIZE,
     )
-
     pairs, labels = generator.generate_pairs()
     pairs, labels = np.array(pairs), np.array(labels).astype(np.float32)
+
+    # Train/val split
     val_split = int(0.9 * len(pairs))
     train_pairs, val_pairs = pairs[:val_split], pairs[val_split:]
     train_labels, val_labels = labels[:val_split], labels[val_split:]
 
+    # Model setup
+    base_network = create_base_network_signet(IMG_SHAPE)
     input_a = Input(shape=IMG_SHAPE)
     input_b = Input(shape=IMG_SHAPE)
-    base_network = create_base_network_signet(IMG_SHAPE)
-    processed_a = base_network(input_a)
-    processed_b = base_network(input_b)
-    distance = layers.Lambda(euclidean_distance)([processed_a, processed_b])
-
+    distance = layers.Lambda(euclidean_distance)([base_network(input_a), base_network(input_b)])
     model = Model([input_a, input_b], distance)
-    optimizer = RMSprop(learning_rate=0.0001, clipnorm=1.0)
-    model.compile(loss=get_contrastive_loss(margin=MARGIN), optimizer=optimizer)
+    model.compile(optimizer=RMSprop(0.0001), loss=get_contrastive_loss(MARGIN))
 
-    model.fit(
-        [train_pairs[:, 0], train_pairs[:, 1]], train_labels,
-        validation_data=([val_pairs[:, 0], val_pairs[:, 1]], val_labels),
-        batch_size=BATCH_SIZE, epochs=EPOCHS
+    early_stopping = EarlyStopping(
+    monitor='val_loss',
+    patience=5,                # You can adjust this (e.g., 3–10 depending on your needs)
+    restore_best_weights=True,
+    verbose=1
     )
 
-    model.save(f"{dataset_name}_signet_model.keras")
+    # ========== Training ==========
+    history = model.fit(
+        [train_pairs[:, 0], train_pairs[:, 1]], train_labels,
+        validation_data=([val_pairs[:, 0], val_pairs[:, 1]], val_labels),
+        batch_size=BATCH_SIZE, 
+        epochs=EPOCHS,
+        callbacks=[early_stopping]
+    )
 
+    # ========== Embedding Extraction ==========
     test_images, test_labels = generator.get_unbatched_data()
     embeddings = base_network.predict(test_images, verbose=0)
 
-    # === SOP 2: All-vs-All comparison (realistic)
-    reference_embeddings = embeddings.copy()
-    query_embeddings = embeddings.copy()
+    # ========== SOP 1 Evaluation ==========
+    genuine_d, forged_d, distances, binary_labels = [], [], [], []
+    for i, emb in enumerate(embeddings):
+        dists = [np.linalg.norm(emb - embeddings[j]) for j in range(len(embeddings)) if i != j]
+        min_dist = min(dists)
+        distances.append(min_dist)
+        binary_labels.append(int(test_labels[i]))
+        if test_labels[i] == 0:
+            genuine_d.append(min_dist)
+        else:
+            forged_d.append(min_dist)
+    sop1_metrics = evaluate_sop1(genuine_d, forged_d, binary_labels, distances)
 
-    distances_slow = []
-    binary_labels_slow = []
-    start = time.time()
+    # ========== SOP 2 Evaluation ==========
+    start_time = time.time()
+    _ = [np.min(np.linalg.norm(embeddings - e, axis=1)) for e in embeddings[:100]]
+    query_time = (time.time() - start_time) / 100
+    sop2_metrics = evaluate_sop2(embeddings, test_labels, query_time)
 
-    for i, emb in enumerate(query_embeddings):
-        label = test_labels[i]
-        dist_to_all = [np.linalg.norm(emb - ref) for j, ref in enumerate(reference_embeddings) if i != j]
-        distances_slow.append(min(dist_to_all))
-        binary_labels_slow.append(label)
-
-    elapsed_slow = time.time() - start
-    time_per_query_slow = elapsed_slow / len(query_embeddings)
-
-    from sklearn.metrics import roc_curve
-    fpr, tpr, thresholds = roc_curve(binary_labels_slow, distances_slow, pos_label=1)
-    best_threshold = thresholds[np.argmax(tpr - fpr)]
-    preds = [1 if d > best_threshold else 0 for d in distances_slow]
-
-    # === SOP 1: Distance Analysis
-    genuine_d = []
-    for i, (emb, label) in enumerate(zip(query_embeddings, test_labels)):
-        if label == 0:
-            dists = [np.linalg.norm(emb - ref) for j, ref in enumerate(reference_embeddings) if i != j]
-            if dists:
-                genuine_d.append(min(dists))
-    forged_d = [d for d, l in zip(distances_slow, binary_labels_slow) if l == 1]
-
-    print(f"\nSOP 1 – 🔍 Distance Distributions:")
-    print(f"Genuine mean distance: {np.mean(genuine_d):.4f}")
-    print(f"Forged mean distance:  {np.mean(forged_d):.4f}")
-    plt.hist(genuine_d, bins=30, alpha=0.6, label='Genuine')
-    plt.hist(forged_d, bins=30, alpha=0.6, label='Forged')
-    plt.axvline(best_threshold, color='red', linestyle='--', label=f'Threshold: {best_threshold:.2f}')
-    plt.title("Distance Distribution (SOP 1: Imbalance)")
-    plt.legend()
-    plt.savefig(f"{dataset_name}_sop1_imbalance_distance_hist.png")
-    plt.close()
-
-    print(f"\n⏱ SOP 2 – Time per query: {time_per_query_slow:.4f}s for {len(query_embeddings)} samples")
-    plt.figure()
-    plt.bar(["SOP 2 – Slow Total Time"], [elapsed_slow])
-    plt.title("SOP 2 – Simulated Scalability Load")
-    plt.ylabel("Seconds")
-    plt.savefig(f"{dataset_name}_sop2_heavy_scalability.png")
-    plt.close()
-
-    # === SOP 3: Clean vs Noisy Evaluation
+    # ========== SOP 3 Evaluation ==========
     try:
-        clean_imgs, clean_lbls = generator.get_unbatched_data()
-        noisy_imgs, noisy_lbls = generator.get_unbatched_data(noisy=True)
-        clean_emb = base_network.predict(clean_imgs)
-        noisy_emb = base_network.predict(noisy_imgs)
-        ref_clean = clean_emb[clean_lbls == 0]
-
-        def eval_quality(embs, lbls):
-            dists = [np.min(np.linalg.norm(ref_clean - e, axis=1)) for e in embs]
-            pred = [1 if d > best_threshold else 0 for d in dists]
-            return accuracy_score(lbls, pred), f1_score(lbls, pred)
-
-        clean_acc, clean_f1 = eval_quality(clean_emb, clean_lbls)
-        noisy_acc, noisy_f1 = eval_quality(noisy_emb, noisy_lbls)
-
-        print(f"\nSOP 3 – 🧼 Clean Accuracy: {clean_acc:.4f}, F1: {clean_f1:.4f}")
-        print(f"SOP 3 – 🔧 Noisy Accuracy: {noisy_acc:.4f}, F1: {noisy_f1:.4f}")
+        clean_imgs, _ = generator.get_unbatched_data()
+        noisy_imgs, _ = generator.get_unbatched_data(noisy=True)
+        noisy_emb = base_network.predict(noisy_imgs, verbose=0)
+        psnrs = [calculate_psnr(clean, noisy) for clean, noisy in zip(clean_imgs, noisy_imgs)]
+        sop3_metrics = evaluate_sop3(embeddings, noisy_emb, test_labels, sop1_metrics['SOP1_Threshold'])
+        sop3_metrics['SOP3_Mean_PSNR'] = np.mean(psnrs) if len(psnrs) > 0 else -1
     except Exception as e:
-        print("⚠️ SOP 3 Evaluation failed:", e)
-        clean_acc = clean_f1 = noisy_acc = noisy_f1 = -1
+        print(f"⚠️ SOP 3 failed: {e}")
+        sop3_metrics = {k: -1 for k in ['SOP3_Mean_PSNR', 'SOP3_Accuracy_Drop', 'SOP3_Mean_Shift', 'SOP3_Max_Shift']}
 
-    # Final Evaluation
-    acc = accuracy_score(binary_labels_slow, preds)
-    f1 = f1_score(binary_labels_slow, preds)
-    auc = roc_auc_score(binary_labels_slow, [-d for d in distances_slow])
+    # ========== Collect Results ==========
+    acc = accuracy_score(binary_labels, [1 if d > sop1_metrics['SOP1_Threshold'] else 0 for d in distances])
+    f1 = f1_score(binary_labels, [1 if d > sop1_metrics['SOP1_Threshold'] else 0 for d in distances])
 
     results.append({
         "Dataset": dataset_name,
+        **sop1_metrics,
+        **sop2_metrics,
+        **sop3_metrics,
         "Accuracy": acc,
-        "F1 Score": f1,
-        "ROC AUC": auc,
-        "Threshold": best_threshold,
-        "SOP 2 – Time per Query": time_per_query_slow,
-        "SOP 3 – Clean Accuracy": clean_acc,
-        "SOP 3 – Clean F1": clean_f1,
-        "SOP 3 – Noisy Accuracy": noisy_acc,
-        "SOP 3 – Noisy F1": noisy_f1,
+        "F1_Score": f1
     })
 
-# ✅ Save results
-pd.DataFrame(results).to_csv("SigNet_SOP_Evaluation.csv", index=False)
-print("\n✅ Results saved to SigNet_SOP_Evaluation.csv")
+    # ✅ Save CSV immediately after each dataset completes:
+    pd.DataFrame(results).to_csv("SigNet_Baseline_SOP_Results.csv", index=False)
+    print(f"✅ Metrics saved to CSV after processing {dataset_name}.")
+
+    # ========== Visualization ==========
+    plt.figure(figsize=(15, 5))
+    plt.subplot(131)
+    plt.hist(genuine_d, bins=30, alpha=0.6, label='Genuine')
+    plt.hist(forged_d, bins=30, alpha=0.6, label='Forged')
+    plt.axvline(sop1_metrics['SOP1_Threshold'], color='r', linestyle='--')
+    plt.title(f"{dataset_name} Distance Distribution")
+    plt.legend()
+
+    plt.subplot(132)
+    from sklearn.decomposition import PCA
+    pca = PCA(n_components=2).fit_transform(embeddings[:200])
+    plt.scatter(pca[:, 0], pca[:, 1], c=test_labels[:200], alpha=0.6)
+    plt.title("Embedding Space (PCA)")
+
+    if 'SOP3_Mean_Shift' in sop3_metrics and sop3_metrics['SOP3_Mean_Shift'] != -1:
+        plt.subplot(133)
+        shifts = np.linalg.norm(embeddings - noisy_emb, axis=1)
+        plt.hist(shifts, bins=20)
+        plt.title("Noise-Induced Embedding Shifts")
+
+    plt.tight_layout()
+    plt.savefig(f"{dataset_name}_baseline_metrics.png")
+    plt.close()
+
+    # ====== Loss Curve Plot (Training vs Validation) ======
+    plt.figure(figsize=(6, 4))
+    plt.plot(history.history['loss'], label='Train Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.title(f'{dataset_name} Training Loss Curve (Contrastive Loss)')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f"{dataset_name}_baseline_loss_curve.png")
+    plt.close()
+
+print(f"📋 Finished evaluation for {dataset_name}. Current CSV updated.\n")

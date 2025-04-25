@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from utils import (
     add_noise_to_image
 )
-import faiss
+#import faiss
 
 # Ensure reproducibility
 np.random.seed(1337)

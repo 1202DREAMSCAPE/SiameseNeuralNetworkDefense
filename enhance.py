@@ -14,11 +14,11 @@ from sklearn.metrics import (
 from utils import (
     add_noise_to_image,
     apply_smote_per_dataset,
-    build_faiss_index,
-    search_faiss,
+    #build_faiss_index,
+    #search_faiss,
     find_hard_negatives,
     compute_hard_negative_metrics,
-    evaluate_with_faiss
+    #evaluate_with_faiss
 )
 import seaborn as sns
 from tqdm import tqdm
@@ -35,7 +35,7 @@ from sklearn.manifold import TSNE
 import pandas as pd
 from scipy.stats import gaussian_kde
 from utils import evaluate_threshold
-import faiss
+#import faiss
 
 # Ensure reproducibility
 np.random.seed(1337)
