@@ -2,6 +2,7 @@ import os
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, Model, Input, Sequential
+from tensorflow.keras.utils import register_keras_serializable
 from tensorflow.keras.optimizers import RMSprop
 from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.metrics import (
@@ -32,6 +33,7 @@ def preprocess_image_simple(img_path, img_height, img_width):
 
 SignatureDataGenerator.preprocess_image = lambda self, img_path: preprocess_image_simple(img_path, self.img_height, self.img_width)
 
+@register_keras_serializable()
 def euclidean_distance(vectors):
     x, y = vectors
     return tf.sqrt(tf.maximum(tf.reduce_sum(tf.square(x - y), axis=1, keepdims=True), tf.keras.backend.epsilon()))
