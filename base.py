@@ -98,8 +98,8 @@ def evaluate_sop1(genuine_d, forged_d, binary_labels, distances):
         metrics['SOP1_FAR'], metrics['SOP1_FRR'] = np.nan, np.nan
     return metrics
 
-def evaluate_sop2(embeddings, labels, query_time):
-    metrics = {'SOP2_Time_Per_Query': query_time}
+def evaluate_sop2(embeddings, labels):
+    metrics = {}
     sample_size = min(1000, len(embeddings))
     if sample_size > 10:
         sample_idx = np.random.choice(len(embeddings), size=sample_size, replace=False)
@@ -129,7 +129,7 @@ def evaluate_sop3(clean_emb, noisy_emb, clean_labels, threshold):
 # ========== CONFIG ==========
 IMG_SHAPE = (155, 220, 3)
 BATCH_SIZE = 32
-EPOCHS = 40
+EPOCHS = 1
 MARGIN = 1.0
 
 datasets = {
@@ -214,10 +214,7 @@ for dataset_name, config in datasets.items():
     sop1_metrics = evaluate_sop1(genuine_d, forged_d, binary_labels, distances)
 
     # ========== SOP 2 Evaluation ==========
-    start_time = time.time()
-    _ = [np.min(np.linalg.norm(embeddings - e, axis=1)) for e in embeddings[:100]]
-    query_time = (time.time() - start_time) / 100
-    sop2_metrics = evaluate_sop2(embeddings, test_labels, query_time)
+    sop2_metrics = evaluate_sop2(embeddings, test_labels)
 
     # ========== SOP 3 Evaluation ==========
     try:
@@ -243,6 +240,12 @@ for dataset_name, config in datasets.items():
         "F1_Score": f1
     })
 
+    model_dir = 'models'
+    if not os.path.exists(model_dir):
+        os.makedirs(model_dir)
+    model_path = os.path.join(model_dir, f'{dataset_name}_model.h5')
+    model.save(model_path)
+    # ========== Save Results to CSV ==========
     # ✅ Save CSV immediately after each dataset completes:
     pd.DataFrame(results).to_csv("SigNet_Baseline_SOP_Results.csv", index=False)
     print(f"✅ Metrics saved to CSV after processing {dataset_name}.")
