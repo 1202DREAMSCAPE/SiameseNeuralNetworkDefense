@@ -3,7 +3,6 @@ import numpy as np
 import tensorflow as tf
 import time
 import random
-import psutil
 import matplotlib.pyplot as plt
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
@@ -14,11 +13,9 @@ from sklearn.metrics import (
 from utils import (
     add_noise_to_image,
     apply_smote_per_dataset,
-    #build_faiss_index,
-    #search_faiss,
     find_hard_negatives,
     compute_hard_negative_metrics,
-    #evaluate_with_faiss
+    evaluate_threshold
 )
 import seaborn as sns
 from tqdm import tqdm
@@ -34,8 +31,6 @@ from sklearn.metrics import classification_report
 from sklearn.manifold import TSNE
 import pandas as pd
 from scipy.stats import gaussian_kde
-from utils import evaluate_threshold
-#import faiss
 
 # Ensure reproducibility
 np.random.seed(1337)
@@ -205,51 +200,53 @@ for dataset_name, dataset_config in datasets.items():
     except Exception as e:
         print(f"❌ Error during training with HNM on {dataset_name}: {e}")
         continue
-        # ✅ Recompute embeddings from trained model
-        all_images, all_labels = generator.get_all_data_with_labels()
-        embeddings = base_network.predict(all_images, verbose=0)
-     # SOP Metrics Calculation
-        genuine_d = [np.min(np.linalg.norm(np.delete(embeddings, i, axis=0) - emb, axis=1))
-                     for i, (emb, label) in enumerate(zip(embeddings, all_labels)) if label == 1]
-        forged_d = [np.min(np.linalg.norm(np.delete(embeddings, i, axis=0) - emb, axis=1))
-                    for i, (emb, label) in enumerate(zip(embeddings, all_labels)) if label == 0]
 
-        sop_metrics_path = f"{dataset_name}_sop_metrics.txt"
-        with open(sop_metrics_path, "w") as f:
-            f.write("SOP 1 – 🔍 Distance Distributions:\n")
-            f.write(f"Genuine mean distance: {np.mean(genuine_d):.4f}\n")
-            f.write(f"Forged mean distance:  {np.mean(forged_d):.4f}\n\n")
+    # ✅ Recompute embeddings from trained model
+    all_images, all_labels = generator.get_all_data_with_labels()
+    embeddings = base_network.predict(all_images, verbose=0)
 
-            # SOP 2 – Time measurement
-            start = time.time()
-            for emb in embeddings:
-                _ = [np.linalg.norm(emb - ref) for ref in embeddings]
-            elapsed = time.time() - start
-            time_per_query = elapsed / len(embeddings)
-            f.write(f"⏱ SOP 2 – Time per query: {time_per_query:.4f}s for {len(embeddings)} samples\n")
+    # SOP Metrics Calculation
+    genuine_d = [np.min(np.linalg.norm(np.delete(embeddings, i, axis=0) - emb, axis=1))
+                   for i, (emb, label) in enumerate(zip(embeddings, all_labels)) if label == 1]
+    forged_d = [np.min(np.linalg.norm(np.delete(embeddings, i, axis=0) - emb, axis=1))
+                 for i, (emb, label) in enumerate(zip(embeddings, all_labels)) if label == 0]
 
-            # SOP 3 – Clean vs Noisy Evaluation
-            try:
-                clean_imgs, clean_lbls = generator.get_unbatched_data()
-                noisy_imgs, noisy_lbls = generator.get_unbatched_data(noisy=True)
-                clean_emb = base_network.predict(clean_imgs)
-                noisy_emb = base_network.predict(noisy_imgs)
-                ref_clean = clean_emb[clean_lbls == 0]
+    sop_metrics_path = f"{dataset_name}_sop_metrics.txt"
+    with open(sop_metrics_path, "w") as f:
+        f.write("SOP 1 – 🔍 Distance Distributions:\n")
+        f.write(f"Genuine mean distance: {np.mean(genuine_d):.4f}\n")
+        f.write(f"Forged mean distance:  {np.mean(forged_d):.4f}\n\n")
 
-                def eval_quality(embs, lbls):
-                    dists = [np.min(np.linalg.norm(ref_clean - e, axis=1)) for e in embs]
-                    pred = [1 if d > np.percentile(genuine_d, 90) else 0 for d in dists]
-                    return accuracy_score(lbls, pred), f1_score(lbls, pred)
+        # SOP 2 – Time measurement
+        start = time.time()
+        for emb in embeddings:
+            _ = [np.linalg.norm(emb - ref) for ref in embeddings]
+        elapsed = time.time() - start
+        time_per_query = elapsed / len(embeddings)
+        f.write(f"⏱ SOP 2 – Time per query: {time_per_query:.4f}s for {len(embeddings)} samples\n")
 
-                clean_acc, clean_f1 = eval_quality(clean_emb, clean_lbls)
-                noisy_acc, noisy_f1 = eval_quality(noisy_emb, noisy_lbls)
+        # SOP 3 – Clean vs Noisy Evaluation
+        try:
+            clean_imgs, clean_lbls = generator.get_unbatched_data()
+            noisy_imgs, noisy_lbls = generator.get_unbatched_data(noisy=True)
+            clean_emb = base_network.predict(clean_imgs)
+            noisy_emb = base_network.predict(noisy_imgs)
+            ref_clean = clean_emb[clean_lbls == 0]
 
-                f.write(f"\nSOP 3 – 🧼 Clean Accuracy: {clean_acc:.4f}, F1: {clean_f1:.4f}\n")
-                f.write(f"SOP 3 – 🔧 Noisy Accuracy: {noisy_acc:.4f}, F1: {noisy_f1:.4f}\n")
-            except Exception as e:
-                f.write("⚠️ SOP 3 Evaluation failed: " + str(e) + "\n")
+            def eval_quality(embs, lbls):
+                dists = [np.min(np.linalg.norm(ref_clean - e, axis=1)) for e in embs]
+                pred = [1 if d > np.percentile(genuine_d, 90) else 0 for d in dists]
+                return accuracy_score(lbls, pred), f1_score(lbls, pred)
 
-        print(f"📄 SOP metrics saved to {sop_metrics_path}")
+            clean_acc, clean_f1 = eval_quality(clean_emb, clean_lbls)
+            noisy_acc, noisy_f1 = eval_quality(noisy_emb, noisy_lbls)
+
+            f.write(f"\nSOP 3 – 🧼 Clean Accuracy: {clean_acc:.4f}, F1: {clean_f1:.4f}\n")
+            f.write(f"SOP 3 – 🔧 Noisy Accuracy: {noisy_acc:.4f}, F1: {noisy_f1:.4f}\n")
+        except Exception as e:
+            f.write("⚠️ SOP 3 Evaluation failed: " + str(e) + "\n")
+
+    print(f"📄 SOP metrics saved to {sop_metrics_path}")
 
     except Exception as e:
         print(f"❌ Failed to collect distances for {dataset_name}: {e}")
@@ -448,6 +445,7 @@ for dataset_name, dataset_config in datasets.items():
     # ============================
     # 📊 METRICS
     # ============================
+
     print("\n📍 FAISS Top-1 Matching Metrics:")
     print("Accuracy:", accuracy_score(y_true_top1, y_pred_top1))
     print("Precision:", precision_score(y_true_top1, y_pred_top1))
@@ -494,9 +492,10 @@ for dataset_name, dataset_config in datasets.items():
 
 
     # ============================
-
-    print("\n📋 Classification Report:")
+    # 📋 Classification Report
+    # ============================
     target_names = ["Forged", "Genuine"]
+    print("\n📋 Classification Report:")
     print(classification_report(y_true_top1, y_pred_top1, target_names=target_names))
 
     # ============================
@@ -512,7 +511,6 @@ for dataset_name, dataset_config in datasets.items():
     plt.savefig(f"{dataset_name}_precision_recall_curve.png")
 
     # ============================
-
     f1s = []
     thresholds_to_check = np.linspace(min(distances), max(distances), 100)
     for t in thresholds_to_check:
@@ -532,8 +530,9 @@ for dataset_name, dataset_config in datasets.items():
 
 
     # ============================
-
     # Separate distances
+    # ============================
+
     genuine_dists = [d for d, l in zip(distances, binary_labels) if l == 1]
     forged_dists = [d for d, l in zip(distances, binary_labels) if l == 0]
 
@@ -648,11 +647,11 @@ for dataset_name, dataset_config in datasets.items():
         noisy_images, noisy_labels = generator.get_unbatched_data(noisy=True)
         # Evaluate both
 
-        clean_acc, clean_f1 = evaluate_with_faiss(base_network, index, clean_images, clean_labels, threshold)
-        noisy_acc, noisy_f1 = evaluate_with_faiss(base_network, index, noisy_images, noisy_labels, threshold)
+        clean_acc, clean_f1 = evaluate_threshold(base_network, clean_images, clean_labels, threshold)
+        noisy_acc, noisy_f1 = evaluate_threshold(base_network, noisy_images, noisy_labels, threshold)
 
         print(f"✅ Clean Accuracy: {clean_acc:.4f}, F1: {clean_f1:.4f}")
-        print(f"⚠️ Noisy Accuracy: {noisy_acc:.4f}, F1: {noisy_f1:.4f}")
+        print(f"⚠ Noisy Accuracy: {noisy_acc:.4f}, F1: {noisy_f1:.4f}")
         print(f"📉 Accuracy Drop: {clean_acc - noisy_acc:.4f}")
         print(f"📉 F1 Drop: {clean_f1 - noisy_f1:.4f}")
 

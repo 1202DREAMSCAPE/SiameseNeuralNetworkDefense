@@ -16,21 +16,21 @@ import cv2
 from SignatureDataGenerator import SignatureDataGenerator
 
 # Preprocessing
-def preprocess_image_simple(self, img_path):
+def preprocess_image_simple(img_path, img_height, img_width):
     if not isinstance(img_path, str) or not os.path.exists(img_path):
-        return np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
+        return np.zeros((img_height, img_width, 3), dtype=np.float32)
     try:
         img = cv2.imread(img_path)
         if img is None:
-            return np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
+            return np.zeros((img_height, img_width, 3), dtype=np.float32)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = cv2.resize(img, (self.img_width, self.img_height))
+        img = cv2.resize(img, (img_width, img_height))
         img = img.astype(np.float32) / 255.0
         return (img - 0.5) / 0.5
     except Exception:
-        return np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
+        return np.zeros((img_height, img_width, 3), dtype=np.float32)
 
-SignatureDataGenerator.preprocess_image = preprocess_image_simple
+SignatureDataGenerator.preprocess_image = lambda self, img_path: preprocess_image_simple(img_path, self.img_height, self.img_width)
 
 def euclidean_distance(vectors):
     x, y = vectors
@@ -120,7 +120,7 @@ def evaluate_sop3(clean_emb, noisy_emb, clean_labels, threshold):
     dists = np.array([np.min(np.linalg.norm(clean_emb[clean_labels == 0] - e, axis=1)) for e in noisy_emb])
     preds = (dists > threshold).astype(int)
     return {
-        'SOP3_Mean_PSNR': -1,
+        'SOP3_Mean_PSNR': np.mean([calculate_psnr(clean, noisy) for clean, noisy in zip(clean_emb, noisy_emb)]),
         'SOP3_Accuracy_Drop': accuracy_score(clean_labels, preds),
         'SOP3_Mean_Shift': np.mean(shifts),
         'SOP3_Max_Shift': np.max(shifts)
@@ -179,20 +179,22 @@ for dataset_name, config in datasets.items():
     model.compile(optimizer=RMSprop(0.0001), loss=get_contrastive_loss(MARGIN))
 
     early_stopping = EarlyStopping(
-    monitor='val_loss',
-    patience=5,                # You can adjust this (e.g., 3–10 depending on your needs)
-    restore_best_weights=True,
-    verbose=1
+        monitor='val_loss',
+        patience=5,
+        restore_best_weights=True,
+        verbose=1
     )
 
     # ========== Training ==========
+    start_time = time.time()
     history = model.fit(
         [train_pairs[:, 0], train_pairs[:, 1]], train_labels,
         validation_data=([val_pairs[:, 0], val_pairs[:, 1]], val_labels),
-        batch_size=BATCH_SIZE, 
+        batch_size=BATCH_SIZE,
         epochs=EPOCHS,
         callbacks=[early_stopping]
     )
+    train_time = time.time() - start_time
 
     # ========== Embedding Extraction ==========
     test_images, test_labels = generator.get_unbatched_data()
@@ -222,9 +224,7 @@ for dataset_name, config in datasets.items():
         clean_imgs, _ = generator.get_unbatched_data()
         noisy_imgs, _ = generator.get_unbatched_data(noisy=True)
         noisy_emb = base_network.predict(noisy_imgs, verbose=0)
-        psnrs = [calculate_psnr(clean, noisy) for clean, noisy in zip(clean_imgs, noisy_imgs)]
         sop3_metrics = evaluate_sop3(embeddings, noisy_emb, test_labels, sop1_metrics['SOP1_Threshold'])
-        sop3_metrics['SOP3_Mean_PSNR'] = np.mean(psnrs) if len(psnrs) > 0 else -1
     except Exception as e:
         print(f"⚠️ SOP 3 failed: {e}")
         sop3_metrics = {k: -1 for k in ['SOP3_Mean_PSNR', 'SOP3_Accuracy_Drop', 'SOP3_Mean_Shift', 'SOP3_Max_Shift']}
@@ -235,6 +235,7 @@ for dataset_name, config in datasets.items():
 
     results.append({
         "Dataset": dataset_name,
+        "Training_Time": train_time,
         **sop1_metrics,
         **sop2_metrics,
         **sop3_metrics,
