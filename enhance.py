@@ -242,7 +242,7 @@ for dataset_name, dataset_config in datasets.items():
 
         early_stopping = EarlyStopping(
             monitor='loss',           # or 'val_loss' if using validation
-            patience=5,               # Number of epochs to wait before stopping
+            patience=10,               # Number of epochs to wait before stopping
             restore_best_weights=True,
             verbose=1
         )
@@ -542,6 +542,9 @@ for dataset_name, dataset_config in datasets.items():
     # Use the calculated optimal threshold for further predictions
     threshold = optimal_threshold
 
+    # ✅ Initialize FINAL results list
+    final_results = []
+
     # Second Loop: Generate final predictions using the calculated threshold
     for i, query in enumerate(query_embeddings):
         label = query_labels[i]
@@ -578,7 +581,7 @@ for dataset_name, dataset_config in datasets.items():
                     break
 
         # Append results to the list
-        results.append([dataset_name_for_eval, writer_id, actual_label, predicted_label, score])
+        final_results.append([dataset_name_for_eval, writer_id, actual_label, predicted_label, score])
 
         # Store metrics for evaluation
         is_genuine = query_labels[i] != -1  # This is already your logic for genuine  # Check the file path to see if it's genuine
@@ -587,7 +590,7 @@ for dataset_name, dataset_config in datasets.items():
         y_scores.append(-score)  # Use negative score for ROC
 
     # Convert the results to a DataFrame after collecting all results
-    df_results = pd.DataFrame(results, columns=["Dataset", "Writer ID", "Actual Label", "Predicted Label", "Score"])
+    df_results = pd.DataFrame(final_results, columns=["Dataset", "Writer ID", "Actual Label", "Predicted Label", "Score"])
 
     # Filter out forged entries if needed (optional)
     df_results = df_results[df_results['Writer ID'] != -1]
