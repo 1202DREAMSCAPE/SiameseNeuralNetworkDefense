@@ -8,7 +8,7 @@ from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, confusion_matrix, precision_recall_curve,
     balanced_accuracy_score, matthews_corrcoef, average_precision_score, 
-    top_k_accuracy_score
+    top_k_accuracy_score, silhouette_score
 )
 from utils import (
     add_noise_to_image,
@@ -30,6 +30,8 @@ from collections import Counter
 from sklearn.metrics import classification_report
 from sklearn.manifold import TSNE
 import pandas as pd
+from scipy.optimize import brentq
+from scipy.interpolate import interp1d
 from scipy.stats import gaussian_kde
 
 # Ensure reproducibility
@@ -177,25 +179,44 @@ for dataset_name, dataset_config in datasets.items():
         print(f"🟢 Steps Per Epoch: {steps_per_epoch}, Batch Size: {generator.batch_sz}")
 
         early_stopping = EarlyStopping(
-        monitor='loss',           # or 'val_loss' if using validation
-        patience=5,               # Number of epochs to wait before stopping
-        restore_best_weights=True,
-        verbose=1
-    )
+            monitor='loss',           # or 'val_loss' if using validation
+            patience=5,               # Number of epochs to wait before stopping
+            restore_best_weights=True,
+            verbose=1
+        )
 
         # ✅ Train the model
         history = triplet_model.fit(
             train_data,
-            epochs=40,
+            epochs=1,
             steps_per_epoch=steps_per_epoch,
             callbacks=[early_stopping] 
         )
 
-        # ✅ Save model
-        triplet_model.save(f"{dataset_name}_triplet_model.keras")
-        base_network.save_weights(f"{dataset_name}.weights.h5")
-        print(f"✅ Model saved as {dataset_name}_triplet_model.keras")
-        print(f"🚀 Training with Hard Negative Mining completed for {dataset_name}")
+       # ✅ Save the full triplet model architecture (only if needed for retraining)
+        triplet_model_json_path = f"{dataset_name}_triplet_model_architecture.json"
+        with open(triplet_model_json_path, 'w') as json_file:
+            json_file.write(triplet_model.to_json())
+        print(f"✅ Full triplet model architecture saved as {triplet_model_json_path}")
+
+        # ✅ Save the full triplet model weights (only if needed for retraining)
+        triplet_model_weights_path = f"{dataset_name}_triplet_model.weights.h5"  # must end with `.weights.h5`
+        triplet_model.save_weights(triplet_model_weights_path)
+        print(f"🚀 Full triplet model weights saved as {triplet_model_weights_path}")
+
+        # ✅ Save the base network architecture (needed for deployment/inference)
+        base_network_json_path = f"{dataset_name}_base_network_architecture.json"
+        with open(base_network_json_path, 'w') as json_file:
+            json_file.write(base_network.to_json())
+        print(f"✅ Base network architecture saved as {base_network_json_path}")
+
+        # ✅ Save the base network weights (needed for deployment/inference)
+        base_network_weights_path = f"{dataset_name}_base_network.weights.h5"  # must end with `.weights.h5`
+        base_network.save_weights(base_network_weights_path)
+        print(f"🚀 Base network weights saved as {base_network_weights_path}")
+
+        # Training with Hard Negative Mining completed for dataset
+        print(f"Training with Hard Negative Mining completed for {dataset_name}")
 
     except Exception as e:
         print(f"❌ Error during training with HNM on {dataset_name}: {e}")
@@ -246,10 +267,7 @@ for dataset_name, dataset_config in datasets.items():
         except Exception as e:
             f.write("⚠️ SOP 3 Evaluation failed: " + str(e) + "\n")
 
-    print(f"📄 SOP metrics saved to {sop_metrics_path}")
-
-    except Exception as e:
-        print(f"❌ Failed to collect distances for {dataset_name}: {e}")
+        print(f"📄 SOP metrics saved to {sop_metrics_path}")
 
     # ============================
     # ✅ Real-World Evaluation
@@ -305,43 +323,49 @@ for dataset_name, dataset_config in datasets.items():
 
 
     # ============================
-    # ✅ Build FAISS index for reference embeddings
-    # ============================
-    print(f"🧪 Test Writers Used: {[writer for _, writer in generator.test_writers]}")
-    print(f"📦 Total reference embeddings collected: {len(reference_embeddings)}")
-    print(f"📦 Total query embeddings collected: {len(query_embeddings)}")
-
-    if len(reference_embeddings) == 0:
-        print("❌ No reference embeddings found. Skipping evaluation.")
-        continue
-
-    index = faiss.IndexFlatL2(EMBEDDING_SIZE)
-    index.add(np.array(reference_embeddings))
-    faiss.write_index(index, f"model/{dataset_name}_signature_index.faiss")
-
-
-    # ============================
     # 🔎 Real-World Evaluation – Both Methods
     # ============================
 
+    # Ensure reference embeddings are a normalized matrix
+    reference_array = np.array(reference_embeddings)
+    reference_norms = reference_array / np.linalg.norm(reference_array, axis=1, keepdims=True)
+
+    # Initialize lists to collect results
     y_true_top1, y_pred_top1, y_scores = [], [], []
     distances = []
     binary_labels = []
-
     results = []
+
     # First Loop: Generate Predictions and Scores
     for i, query in enumerate(query_embeddings):
         label = query_labels[i]
+        
+        # Normalize the query
         query_norm = query / np.linalg.norm(query)
-        D, I = index.search(np.expand_dims(query_norm, axis=0), k=1)
-        score = D[0][0]
+        
+        # Compute L2 distances to all references
+        dists = np.linalg.norm(reference_norms - query_norm, axis=1)
+        
+        # Find minimum distance (nearest reference)
+        score = np.min(dists)
 
-        # Store the score and label for later threshold calculation
+        # Save the score and actual label
         distances.append(score)
         label_type, _ = query_labels[i]
         binary_labels.append(1 if label_type == "Genuine" else 0)
 
-        #binary_labels.append(1 if label != -1 else 0)  # 1 = genuine, 0 = forged
+        # (Optional) Save detailed info for later CSV
+        results.append({
+            "Query_Index": i,
+            "Actual_Label": label_type,
+            "Distance": score
+        })
+
+    # 📆 Save Raw Distances and Labels to CSV for review
+    results_df = pd.DataFrame(results)
+    results_csv_path = f"{dataset_name}_raw_distances.csv"
+    results_df.to_csv(results_csv_path, index=False)
+    print(f"✅ Raw distances saved as {results_csv_path}")
 
     # ============================
     # 🔎 Calculate Optimal Threshold Based on Intersection
@@ -376,8 +400,9 @@ for dataset_name, dataset_config in datasets.items():
     for i, query in enumerate(query_embeddings):
         label = query_labels[i]
         query_norm = query / np.linalg.norm(query)
-        D, I = index.search(np.expand_dims(query_norm, axis=0), k=1)
-        score = D[0][0]
+        dists = np.linalg.norm(reference_norms - query_norm, axis=1)
+        score = np.min(dists)
+
 
         label_type, writer_id = query_labels[i]
         # Predict based on the calculated threshold
@@ -442,17 +467,6 @@ for dataset_name, dataset_config in datasets.items():
     y_pred_thresh = [1 if d < threshold else 0 for d in distances]
     y_true_thresh = binary_labels
 
-    # ============================
-    # 📊 METRICS
-    # ============================
-
-    print("\n📍 FAISS Top-1 Matching Metrics:")
-    print("Accuracy:", accuracy_score(y_true_top1, y_pred_top1))
-    print("Precision:", precision_score(y_true_top1, y_pred_top1))
-    print("Recall:", recall_score(y_true_top1, y_pred_top1))
-    print("F1:", f1_score(y_true_top1, y_pred_top1))
-    print("ROC AUC (Top-1):", roc_auc_score(y_true_top1, y_scores))
-
     print("\n📍 Threshold-Based Metrics (Threshold = {:.4f}):".format(threshold))
     print("Accuracy:", accuracy_score(y_true_thresh, y_pred_thresh))
     print("Precision:", precision_score(y_true_thresh, y_pred_thresh))
@@ -461,19 +475,20 @@ for dataset_name, dataset_config in datasets.items():
     print("ROC AUC (Threshold-Based):", roc_auc_score(y_true_thresh, [-d for d in distances]))
     print("Balanced Accuracy (Threshold-Based):", balanced_accuracy_score(y_true_thresh, y_pred_thresh))
 
+    # Calculate Silhouette Score
+    silhouette_avg = silhouette_score(np.array(query_embeddings), np.array(binary_labels))
+    print(f"Dataset: {dataset_name}, Silhouette Score: {silhouette_avg:.4f}")
+
+    # Save Silhouette Score to a file specific to the dataset
+    silhouette_score_path = f"{dataset_name}_silhouette_score.txt"
+    with open(silhouette_score_path, "w") as f:
+        f.write(f"Silhouette Score: {silhouette_avg:.4f}\n")
+
     # ============================
     # ⏱ FAISS vs Brute-force Timing Comparison
     # ============================
 
     print("\n⏱ Timing Comparison:")
-
-    # FAISS timing
-    start = time.time()
-    for query in query_embeddings:
-        query_norm = query / np.linalg.norm(query)
-        index.search(np.expand_dims(query_norm, axis=0), k=1)
-    faiss_time = time.time() - start
-    print("FAISS Total Time:", faiss_time)
 
     # Brute-force timing
     reference_array = np.array(reference_embeddings)
@@ -487,7 +502,6 @@ for dataset_name, dataset_config in datasets.items():
     print("Brute-force Total Time:", brute_time)
 
     num_queries = len(query_embeddings)
-    print(f"🕒 Time per query (FAISS): {faiss_time / num_queries:.6f} seconds")
     print(f"🕒 Time per query (Brute-force): {brute_time / num_queries:.6f} seconds")
 
 
@@ -610,14 +624,6 @@ for dataset_name, dataset_config in datasets.items():
     with open(output_path, "w") as f:
         f.write(f"📍 Dataset: {dataset_name}\n")
 
-        f.write("📍 FAISS Top-1 Matching Metrics:\n")
-        f.write(f"Accuracy: {accuracy_score(y_true_top1, y_pred_top1):.4f}\n")
-        f.write(f"Balanced Accuracy: {balanced_accuracy_score(y_true_top1, y_pred_top1):.4f}\n")
-        f.write(f"Precision: {precision_score(y_true_top1, y_pred_top1):.4f}\n")
-        f.write(f"Recall: {recall_score(y_true_top1, y_pred_top1):.4f}\n")
-        f.write(f"F1: {f1_score(y_true_top1, y_pred_top1):.4f}\n")
-        f.write(f"ROC AUC (Top-1): {roc_auc_score(y_true_top1, y_scores):.4f}\n\n")
-
         f.write(f"📍 Threshold-Based Metrics (Threshold = {threshold:.4f}):\n")
         f.write(f"Accuracy: {accuracy_score(binary_labels, y_pred_thresh):.4f}\n")
         f.write(f"Balanced Accuracy: {balanced_accuracy_score(binary_labels, y_pred_thresh):.4f}\n")
@@ -627,10 +633,9 @@ for dataset_name, dataset_config in datasets.items():
         f.write(f"ROC AUC (Threshold-Based): {roc_auc_score(binary_labels, [-d for d in distances]):.4f}\n\n")
 
         f.write("⏱ Timing Comparison:\n")
-        f.write(f"FAISS Total Time: {faiss_time:.4f} seconds\n")
         f.write(f"Brute-force Total Time: {brute_time:.4f} seconds\n")
-        f.write(f"Time per Query (FAISS): {faiss_time / len(query_embeddings):.6f} seconds\n")
         f.write(f"Time per Query (Brute-force): {brute_time / len(query_embeddings):.6f} seconds\n")
+        f.write(f"Silhouette Score: {silhouette_avg:.4f}\n")
 
         f.write("\n📋 Classification Report:\n")
         f.write(report)
