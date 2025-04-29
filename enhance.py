@@ -11,7 +11,6 @@ from sklearn.metrics import (
     top_k_accuracy_score, silhouette_score, roc_curve
 )
 from utils import (
-    add_noise_to_image,
     apply_smote_per_dataset,
     find_hard_negatives,
     compute_hard_negative_metrics,
@@ -193,8 +192,6 @@ print(f"🔎 Shape of X_final: {X_final.shape}")
 print(f"🔎 Shape of y_final: {y_final.shape}")
 
 # ============================
-# Training Loop (train the model using balanced data)
-# ============================
 # Training Loop (with Hard Negative Mining)
 for dataset_name, dataset_config in datasets.items():
     print(f"\n--- Training Model on {dataset_name} (with Hard Negative Mining) ---")
@@ -253,7 +250,7 @@ for dataset_name, dataset_config in datasets.items():
         # ✅ Train the model
         history = triplet_model.fit(
             train_data,
-            epochs=1,
+            epochs=40,
             steps_per_epoch=steps_per_epoch,
             callbacks=[early_stopping] 
         )
