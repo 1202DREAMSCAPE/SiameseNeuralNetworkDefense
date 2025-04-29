@@ -459,42 +459,62 @@ for dataset_name, dataset_config in datasets.items():
     reference_array = np.array(reference_embeddings)
     reference_norms = reference_array / np.linalg.norm(reference_array, axis=1, keepdims=True)
 
-    # Initialize lists to collect results
+    # Initialize lists
     y_true_top1, y_pred_top1, y_scores = [], [], []
     distances = []
     binary_labels = []
-    results = []
+
+    # Separate results for raw distances and classification output
+    raw_results = []
+    classification_results = []
 
     # First Loop: Generate Predictions and Scores
     for i, query in enumerate(query_embeddings):
-        label = query_labels[i]
+        label_type, _ = query_labels[i]
         
-        # Normalize the query
         query_norm = query / np.linalg.norm(query)
-        
-        # Compute L2 distances to all references
         dists = np.linalg.norm(reference_norms - query_norm, axis=1)
-        
-        # Find minimum distance (nearest reference)
         score = np.min(dists)
 
-        # Save the score and actual label
         distances.append(score)
-        label_type, _ = query_labels[i]
         binary_labels.append(1 if label_type == "Genuine" else 0)
 
-        # (Optional) Save detailed info for later CSV
-        results.append({
+        # Save raw distances for analysis
+        raw_results.append({
             "Query_Index": i,
             "Actual_Label": label_type,
             "Distance": score
         })
 
-    # 📆 Save Raw Distances and Labels to CSV for review
-    results_df = pd.DataFrame(results)
-    results_csv_path = f"{dataset_name}_raw_distances.csv"
-    results_df.to_csv(results_csv_path, index=False)
-    print(f"✅ Raw distances saved as {results_csv_path}")
+    # Save raw distances as CSV
+    raw_df = pd.DataFrame(raw_results)
+    raw_df.to_csv(f"{dataset_name}_raw_distances.csv", index=False)
+    print(f"✅ Raw distances saved as {dataset_name}_raw_distances.csv")
+
+    # Second Loop: Classification results based on threshold
+    for i, query in enumerate(query_embeddings):
+        label_type, writer_id = query_labels[i]
+
+        query_norm = query / np.linalg.norm(query)
+        dists = np.linalg.norm(reference_norms - query_norm, axis=1)
+        score = np.min(dists)
+
+        predicted_label = "Genuine" if score <= threshold else "Forged"
+        actual_label = label_type
+
+        # Append classification result (list of 5 values)
+        classification_results.append([dataset_name, writer_id, actual_label, predicted_label, score])
+
+        # Store for metric evaluation
+        y_true_top1.append(1 if actual_label == "Genuine" else 0)
+        y_pred_top1.append(1 if predicted_label == "Genuine" else 0)
+        y_scores.append(-score)
+
+    # ✅ Save classification results to CSV
+    df_results = pd.DataFrame(classification_results, columns=["Dataset", "Writer ID", "Actual Label", "Predicted Label", "Score"])
+    df_results = df_results[df_results['Writer ID'] != -1]  # Optional: filter
+    df_results.to_csv(f"{dataset_name}_classification_results.csv", index=False)
+    print(f"✅ CSV file saved: {dataset_name}_classification_results.csv")
 
     # ============================
     # 🔎 Calculate Optimal Threshold Based on Intersection
