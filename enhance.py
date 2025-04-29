@@ -8,7 +8,7 @@ from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, confusion_matrix, precision_recall_curve,
     balanced_accuracy_score, matthews_corrcoef, average_precision_score, 
-    top_k_accuracy_score, silhouette_score
+    top_k_accuracy_score, silhouette_score, roc_curve
 )
 from utils import (
     add_noise_to_image,
@@ -51,6 +51,71 @@ if gpus:
 
 # Embedding Size
 EMBEDDING_SIZE = 128  
+
+
+# --- SOP METRIC FUNCTIONS ---
+
+def evaluate_sop1(genuine_d, forged_d, binary_labels, distances):
+    metrics = {
+        'SOP1_Mean_Genuine': np.mean(genuine_d),
+        'SOP1_Mean_Forged': np.mean(forged_d),
+        'SOP1_Std_Genuine': np.std(genuine_d),
+        'SOP1_Std_Forged': np.std(forged_d)
+    }
+    fpr, tpr, thresholds = roc_curve(binary_labels, distances)
+    try:
+        eer_func = interp1d(fpr, tpr)
+        eer = brentq(lambda x: 1. - x - eer_func(x), 0., 1.)
+    except Exception:
+        eer = -1
+    metrics.update({
+        'SOP1_EER': eer,
+        'SOP1_AUC_ROC': roc_auc_score(binary_labels, -np.array(distances)),
+        'SOP1_Threshold': thresholds[np.argmax(tpr - fpr)]
+    })
+    hist_gen, bins = np.histogram(genuine_d, bins=30, density=True)
+    hist_forg, _ = np.histogram(forged_d, bins=bins, density=True)
+    metrics['SOP1_Overlap_Area'] = np.sum(np.minimum(hist_gen, hist_forg)) * (bins[1] - bins[0])
+    preds = [1 if d > metrics['SOP1_Threshold'] else 0 for d in distances]
+    cm = confusion_matrix(binary_labels, preds)
+    if cm.shape == (2, 2):
+        TN, FP, FN, TP = cm.ravel()
+        metrics['SOP1_FAR'] = FP / (FP + TN) if (FP + TN) != 0 else np.nan
+        metrics['SOP1_FRR'] = FN / (FN + TP) if (FN + TP) != 0 else np.nan
+    else:
+        metrics['SOP1_FAR'], metrics['SOP1_FRR'] = np.nan, np.nan
+    return metrics
+
+def evaluate_sop2(embeddings, labels):
+    sample_size = min(1000, len(embeddings))
+    if sample_size > 10:
+        sample_idx = np.random.choice(len(embeddings), size=sample_size, replace=False)
+        silhouette = silhouette_score(embeddings[sample_idx], labels[sample_idx]) if len(np.unique(labels[sample_idx])) > 1 else -1
+        intra_class_var = np.mean([np.var(embeddings[labels == i], axis=0).mean() for i in np.unique(labels)])
+    else:
+        silhouette = -1
+        intra_class_var = -1
+    return {
+        'SOP2_Silhouette': silhouette,
+        'SOP2_IntraClass_Var': intra_class_var
+    }
+
+def evaluate_sop3(clean_emb, noisy_emb, clean_labels, threshold):
+    shifts = np.linalg.norm(clean_emb - noisy_emb, axis=1)
+    dists = np.array([np.min(np.linalg.norm(clean_emb[clean_labels == 0] - e, axis=1)) for e in noisy_emb])
+    preds = (dists > threshold).astype(int)
+    acc_drop = 1 - accuracy_score(clean_labels, preds)
+    psnr_list = []
+    for c, n in zip(clean_emb, noisy_emb):
+        mse = np.mean((c - n) ** 2)
+        psnr = 20 * np.log10(1.0 / np.sqrt(mse)) if mse != 0 else float('inf')
+        psnr_list.append(psnr)
+    return {
+        'SOP3_Mean_PSNR': np.mean(psnr_list),
+        'SOP3_Accuracy_Drop': acc_drop,
+        'SOP3_Mean_Shift': np.mean(shifts),
+        'SOP3_Max_Shift': np.max(shifts)
+    }
 
 # Dataset Configuration
 datasets = {
@@ -226,6 +291,57 @@ for dataset_name, dataset_config in datasets.items():
     all_images, all_labels = generator.get_all_data_with_labels()
     embeddings = base_network.predict(all_images, verbose=0)
 
+    # ============================
+    # ✅ Prepare Reference and Query Embeddings (Real-World Evaluation Setup)
+    # ============================
+    print(f"\n🧪 Real-World Evaluation for {dataset_name}")
+
+    reference_embeddings = []
+    reference_labels = []
+
+    query_embeddings = []
+    query_labels = []
+
+    # Loop through test writers
+    for dataset_path, writer in tqdm(generator.test_writers, desc="🔍 Processing test writers"):
+        writer_path = os.path.join(dataset_path, f"writer_{writer:03d}")
+        genuine_path = os.path.join(writer_path, "genuine")
+        forged_path = os.path.join(writer_path, "forged")
+
+        genuine_files = sorted([
+            os.path.join(genuine_path, f)
+            for f in os.listdir(genuine_path)
+            if f.lower().endswith((".png", ".jpg", ".jpeg"))
+        ])
+        forged_files = sorted([
+            os.path.join(forged_path, f)
+            for f in os.listdir(forged_path)
+            if f.lower().endswith((".png", ".jpg", ".jpeg"))
+        ])
+
+        if len(genuine_files) < 2 or len(forged_files) < 1:
+            continue
+
+        # Reference embedding: 1 genuine signature as reference
+        reference_img = generator.preprocess_image(genuine_files[0])
+        reference_emb = base_network.predict(np.expand_dims(reference_img, axis=0), verbose=0)[0]
+        reference_embeddings.append(reference_emb)
+        reference_labels.append(writer)
+
+        # Remaining genuine signatures as positive queries
+        for img_path in tqdm(genuine_files[1:], leave=False, desc=f"Writer {writer} - Genuine"):
+            query_img = generator.preprocess_image(img_path)
+            emb = base_network.predict(np.expand_dims(query_img, axis=0), verbose=0)[0]
+            query_embeddings.append(emb)
+            query_labels.append(("Genuine", writer))
+
+        # Forged signatures as negative queries
+        for img_path in tqdm(forged_files, leave=False, desc=f"Writer {writer} - Forged"):
+            query_img = generator.preprocess_image(img_path)
+            emb = base_network.predict(np.expand_dims(query_img, axis=0), verbose=0)[0]
+            query_embeddings.append(emb)
+            query_labels.append(("Forged", writer))
+
     # SOP Metrics Calculation
     genuine_d = [np.min(np.linalg.norm(np.delete(embeddings, i, axis=0) - emb, axis=1))
                    for i, (emb, label) in enumerate(zip(embeddings, all_labels)) if label == 1]
@@ -269,57 +385,70 @@ for dataset_name, dataset_config in datasets.items():
 
         print(f"📄 SOP metrics saved to {sop_metrics_path}")
 
-    # ============================
-    # ✅ Real-World Evaluation
-    # ============================
+    # --- REAL-WORLD EVALUATION STARTS HERE ---
+
     print(f"\n🧪 Real-World Evaluation for {dataset_name}")
 
-    reference_embeddings = []
-    reference_labels = []
+    reference_array = np.array(reference_embeddings)
+    reference_norms = reference_array / np.linalg.norm(reference_array, axis=1, keepdims=True)
 
-    query_embeddings = []
-    query_labels = []
+    # First loop to get distances
+    distances = []
+    binary_labels = []
+    for query, (label_type, _) in zip(query_embeddings, query_labels):
+        query_norm = query / np.linalg.norm(query)
+        dists = np.linalg.norm(reference_norms - query_norm, axis=1)
+        score = np.min(dists)
+        distances.append(score)
+        binary_labels.append(1 if label_type == "Genuine" else 0)
 
-    # Loop through test writers
-    for dataset_path, writer in tqdm(generator.test_writers, desc="🔍 Processing test writers"):
-        writer_path = os.path.join(dataset_path, f"writer_{writer:03d}")
-        genuine_path = os.path.join(writer_path, "genuine")
-        forged_path = os.path.join(writer_path, "forged")
+    # Kernel Density for Optimal Threshold
+    genuine_dists = [d for d, l in zip(distances, binary_labels) if l == 1]
+    forged_dists = [d for d, l in zip(distances, binary_labels) if l == 0]
 
-        genuine_files = sorted([
-            os.path.join(genuine_path, f)
-            for f in os.listdir(genuine_path)
-            if f.lower().endswith((".png", ".jpg", ".jpeg"))
-        ])
+    genuine_kde = gaussian_kde(genuine_dists)
+    forged_kde = gaussian_kde(forged_dists)
+    x_range = np.linspace(min(min(genuine_dists), min(forged_dists)), max(max(genuine_dists), max(forged_dists)), 1000)
+    genuine_density = genuine_kde(x_range)
+    forged_density = forged_kde(x_range)
 
-        forged_files = sorted([
-            os.path.join(forged_path, f)
-            for f in os.listdir(forged_path)
-            if f.lower().endswith((".png", ".jpg", ".jpeg"))
-        ])
+    intersection_idx = np.argwhere(np.diff(np.sign(genuine_density - forged_density))).flatten()
+    threshold = x_range[intersection_idx][0] if len(intersection_idx) > 0 else np.percentile(genuine_dists, 90)
+    print(f"🔑 Optimal Threshold: {threshold:.4f}")
 
-        if len(genuine_files) < 2 or len(forged_files) < 1:
-            continue
+    # Second loop to predict
+    y_pred_thresh = [1 if d <= threshold else 0 for d in distances]
+    y_true_thresh = binary_labels
 
-        # Reference embedding
-        reference_img = generator.preprocess_image(genuine_files[0])
-        reference_emb = base_network.predict(np.expand_dims(reference_img, axis=0), verbose=0)[0]
-        reference_embeddings.append(reference_emb)
-        reference_labels.append(writer)
+    # --- SOP METRICS ---
+    sop1 = evaluate_sop1(genuine_dists, forged_dists, binary_labels, distances)
+    sop2 = evaluate_sop2(np.array(query_embeddings), np.array(binary_labels))
+    try:
+        clean_images, clean_labels = generator.get_unbatched_data()
+        noisy_images, noisy_labels = generator.get_unbatched_data(noisy=True)
+        clean_emb = base_network.predict(clean_images)
+        noisy_emb = base_network.predict(noisy_images)
+        sop3 = evaluate_sop3(clean_emb, noisy_emb, clean_labels, sop1['SOP1_Threshold'])
+    except Exception as e:
+        print(f"⚠️ SOP3 Evaluation failed: {e}")
+        sop3 = {'SOP3_Mean_PSNR': -1, 'SOP3_Accuracy_Drop': -1, 'SOP3_Mean_Shift': -1, 'SOP3_Max_Shift': -1}
 
-        # Remaining genuine as positive queries
-        for img_path in tqdm(genuine_files[1:], leave=False, desc=f"Writer {writer} - Genuine"):
-            query_img = generator.preprocess_image(img_path)
-            emb = base_network.predict(np.expand_dims(query_img, axis=0), verbose=0)[0]
-            query_embeddings.append(emb)
-            query_labels.append(("Genuine", writer))
+    # Merge all SOP
+    enhanced_sop = {**sop1, **sop2, **sop3}
 
-        # Forged queries
-        for img_path in tqdm(forged_files, leave=False, desc=f"Writer {writer} - Forged"):
-            query_img = generator.preprocess_image(img_path)
-            emb = base_network.predict(np.expand_dims(query_img, axis=0), verbose=0)[0]
-            query_embeddings.append(emb)
-            query_labels.append(("Forged", writer))
+    # Save to CSV
+    enhanced_df = pd.DataFrame([enhanced_sop])
+    enhanced_csv = f"{dataset_name}_enhanced_SOP_metrics.csv"
+    enhanced_df.to_csv(enhanced_csv, index=False)
+    print(f"📄 Enhanced SOP metrics saved: {enhanced_csv}")
+
+    # --- Append to evaluation_metrics.txt ---
+    eval_path = f"{dataset_name}_evaluation_metrics.txt"
+    with open(eval_path, "a") as f:
+        f.write("\n\n=== ENHANCED SOP METRICS ===\n")
+        for key, value in enhanced_sop.items():
+            f.write(f"{key}: {value:.4f}\n")
+    print(f"✅ SOP metrics appended to {eval_path}")
 
 
     # ============================

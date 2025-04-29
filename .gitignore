@@ -3,3 +3,5 @@
 /.venv
 /models
 /CLAHE_Comparison_CEDAR
+/CLAHE_Comparison_BHSig260_Bengali
+/CLAHE_Comparison_BHSig260_Hindi
