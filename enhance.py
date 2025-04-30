@@ -14,7 +14,7 @@ from utils import (
     apply_smote_per_dataset,
     find_hard_negatives,
     compute_hard_negative_metrics,
-    evaluate_threshold
+    evaluate_threshold_with_given_threshold
 )
 import seaborn as sns
 from tqdm import tqdm
@@ -24,14 +24,15 @@ from SigNet_v1 import get_triplet_loss
 from SigNet_v1 import create_base_network_signet_dilated as create_base_network_signet
 from SigNet_v1 import create_triplet_network
 from imblearn.over_sampling import SMOTE
-from SignatureDataGenerator import SignatureDataGenerator
 from collections import Counter
+from SignatureDataGenerator import SignatureDataGenerator
 from sklearn.metrics import classification_report
 from sklearn.manifold import TSNE
 import pandas as pd
 from scipy.optimize import brentq
 from scipy.interpolate import interp1d
 from scipy.stats import gaussian_kde
+
 
 # Ensure reproducibility
 np.random.seed(1337)
@@ -176,16 +177,59 @@ for dataset_name, dataset_config in datasets.items():
     except Exception as e:
         print(f"❌ Error preparing dataset {dataset_name}: {e}")
         continue
+# ============================
+    # === LOGGING SETUP ===
+    log_path = "SMOTE_training_log.txt"
+    log_file = open(log_path, "a")  # append mode
 
-# Step 3: Apply SMOTE to each dataset independently if imbalance is detected
-print("\n🚀 Applying SMOTE to each dataset independently...")
-X_final, y_final = apply_smote_per_dataset(dataset_embeddings)
+    print(f"\n🔄 Preparing training for dataset: {dataset_name}")
+    log_file.write(f"\n🔄 Preparing training for dataset: {dataset_name}\n")
 
-# ✅ Correct: Train on balanced images after per-dataset SMOTE
-train_data = tf.data.Dataset.from_tensor_slices((
-    (X_final, X_final, X_final),  # Placeholder for triplets
-    np.zeros((len(X_final),))  # Dummy labels required for Keras API
-)).batch(generator.batch_sz, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+    # === Extract Embeddings for This Dataset Only ===
+    embeddings, labels = dataset_embeddings[dataset_name]
+    label_counts = Counter(labels)
+    print(f"📊 Original label distribution: {label_counts}")
+    log_file.write(f"📊 Original label distribution: {label_counts}\n")
+
+    # === Conditionally Apply SMOTE ===
+    if dataset_name == "CEDAR":
+        print(f"🧼 SMOTE skipped for {dataset_name} — dataset is assumed balanced.")
+        log_file.write(f"🧼 SMOTE SKIPPED for {dataset_name}\n")
+        X_final, y_final = embeddings, labels
+    else:
+        try:
+            smote = SMOTE(random_state=42)
+            X_final, y_final = smote.fit_resample(embeddings, labels)
+            new_counts = Counter(y_final)
+            print(f"✅ SMOTE applied. New label distribution: {new_counts}")
+            log_file.write(f"✅ SMOTE applied. New label distribution: {new_counts}\n")
+        except Exception as e:
+            print(f"⚠️ SMOTE failed: {e}")
+            log_file.write(f"⚠️ SMOTE failed: {e}\n")
+            X_final, y_final = embeddings, labels
+            log_file.write(f"🔁 Using original embeddings for {dataset_name}\n")
+
+    # === Final Size Log ===
+    print(f"📦 Final training size for {dataset_name}: {len(X_final)} samples")
+    log_file.write(f"📦 Final training size: {len(X_final)} samples\n")
+
+    log_file.close()  # 🔒 Always close log file
+
+    # === Build Dummy Dataset Placeholder (for compatibility) ===
+    train_data = tf.data.Dataset.from_tensor_slices((
+        (X_final, X_final, X_final),
+        np.zeros((len(X_final),))
+    )).batch(generator.batch_sz, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+
+    # # Step 3: Apply SMOTE to each dataset independently if imbalance is detected
+    # print("\n🚀 Applying SMOTE to each dataset independently...")
+    # X_final, y_final = apply_smote_per_dataset(dataset_embeddings)
+
+    # # ✅ Correct: Train on balanced images after per-dataset SMOTE
+    # train_data = tf.data.Dataset.from_tensor_slices((
+    #     (X_final, X_final, X_final),  # Placeholder for triplets
+    #     np.zeros((len(X_final),))  # Dummy labels required for Keras API
+    # )).batch(generator.batch_sz, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
 # Confirm shapes after balancing
 print(f"🔎 Shape of X_final: {X_final.shape}")
@@ -197,7 +241,6 @@ for dataset_name, dataset_config in datasets.items():
     print(f"\n--- Training Model on {dataset_name} (with Hard Negative Mining) ---")
 
     try:
-        # Initialize data generator
         train_writers = dataset_config["train_writers"]
         test_writers = dataset_config["test_writers"]
 
@@ -208,21 +251,14 @@ for dataset_name, dataset_config in datasets.items():
             batch_sz=32
         )
 
-        # ✅ Create base network
         base_network = create_base_network_signet((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
 
-        # ✅ Generate hard-mined triplets (anchor, positive, hardest negative)
         anchor_imgs, positive_imgs, negative_imgs = generator.generate_hard_mined_triplets(base_network)
 
-        # Check shape
         print(f"🔎 Anchor shape: {np.array(anchor_imgs).shape}")
         print(f"🔎 Positive shape: {np.array(positive_imgs).shape}")
         print(f"🔎 Negative shape: {np.array(negative_imgs).shape}")
 
-        # ✅ Create Triplet Network
-        triplet_model = create_triplet_network((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
-
-        # ✅ Convert to tf.data.Dataset
         dummy_labels = np.zeros((len(anchor_imgs),))
         train_data = tf.data.Dataset.from_tensor_slices((
             (np.array(anchor_imgs), np.array(positive_imgs), np.array(negative_imgs)),
@@ -231,65 +267,84 @@ for dataset_name, dataset_config in datasets.items():
          .batch(generator.batch_sz, drop_remainder=True) \
          .prefetch(tf.data.AUTOTUNE)
 
-        # ✅ Compile using get_triplet_loss
-        triplet_model.compile(
-            optimizer=RMSprop(learning_rate=0.001),
-            loss=get_triplet_loss(margin=0.5)
-        )
+        best_loss = float("inf")
+        best_margin = None
 
         steps_per_epoch = max(1, len(anchor_imgs) // generator.batch_sz)
         print(f"🟢 Steps Per Epoch: {steps_per_epoch}, Batch Size: {generator.batch_sz}")
 
-        early_stopping = EarlyStopping(
-            monitor='loss',           # or 'val_loss' if using validation
-            patience=10,               # Number of epochs to wait before stopping
-            restore_best_weights=True,
-            verbose=1
-        )
+        for margin in [0.2, 0.3, 0.5, 0.7, 1.0]:
+            print(f"\n🔁 Training with margin = {margin}")
+            
+            triplet_model = create_triplet_network((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
+            triplet_model.compile(
+                optimizer=RMSprop(learning_rate=0.001),
+                loss=get_triplet_loss(margin=margin)
+            )
 
-        # ✅ Train the model
-        history = triplet_model.fit(
-            train_data,
-            epochs=40,
-            steps_per_epoch=steps_per_epoch,
-            callbacks=[early_stopping] 
-        )
+            early_stopping = EarlyStopping(
+                monitor='loss',
+                patience=10,
+                restore_best_weights=True,
+                verbose=1
+            )
 
-       # ✅ Save the full triplet model architecture (only if needed for retraining)
-        triplet_model_json_path = f"{dataset_name}_triplet_model_architecture.json"
-        with open(triplet_model_json_path, 'w') as json_file:
-            json_file.write(triplet_model.to_json())
-        print(f"✅ Full triplet model architecture saved as {triplet_model_json_path}")
+            history = triplet_model.fit(
+                train_data,
+                epochs=1,
+                steps_per_epoch=steps_per_epoch,
+                callbacks=[early_stopping],
+                verbose=1
+            )
 
-        # ✅ Save the full triplet model weights (only if needed for retraining)
-        triplet_model_weights_path = f"{dataset_name}_triplet_model.weights.h5"  # must end with `.weights.h5`
-        triplet_model.save_weights(triplet_model_weights_path)
-        print(f"🚀 Full triplet model weights saved as {triplet_model_weights_path}")
+            final_loss = history.history['loss'][-1]
+            print(f"📉 Final training loss for margin {margin}: {final_loss:.4f}")
 
-        # ✅ Save the base network architecture (needed for deployment/inference)
-        base_network_json_path = f"{dataset_name}_base_network_architecture.json"
-        with open(base_network_json_path, 'w') as json_file:
-            json_file.write(base_network.to_json())
-        print(f"✅ Base network architecture saved as {base_network_json_path}")
-
-        # ✅ Save the base network weights (needed for deployment/inference)
-        base_network_weights_path = f"{dataset_name}_base_network.weights.h5"  # must end with `.weights.h5`
-        base_network.save_weights(base_network_weights_path)
-        print(f"🚀 Base network weights saved as {base_network_weights_path}")
-
-        # Training with Hard Negative Mining completed for dataset
-        print(f"Training with Hard Negative Mining completed for {dataset_name}")
+            if final_loss < best_loss:
+                best_loss = final_loss
+                best_margin = margin
+                triplet_model.save_weights(f"{dataset_name}_triplet_model_margin{margin:.1f}.weights.h5")
+                base_network.save_weights(f"{dataset_name}_base_network_margin{margin:.1f}.weights.h5")
+                print(f"✅ Saved best model for margin {margin:.1f}")
 
     except Exception as e:
         print(f"❌ Error during training with HNM on {dataset_name}: {e}")
         continue
 
+    print(f"\n🏁 Best margin for {dataset_name}: {best_margin} with loss = {best_loss:.4f}")
+    with open("best_margins_log.txt", "a") as log_file:
+        log_file.write(f"{dataset_name}: Best Margin = {best_margin}, Loss = {best_loss:.4f}\n")
+
+    # After margin sweep completes, reload the best model
+    best_triplet_model = create_triplet_network((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
+    best_triplet_model.load_weights(f"{dataset_name}_triplet_model_margin{best_margin:.1f}.weights.h5")
+
+    best_base_network = create_base_network_signet((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
+    best_base_network.load_weights(f"{dataset_name}_base_network_margin{best_margin:.1f}.weights.h5")
+
+    # ✅ Save full architectures (optional but useful)
+    triplet_model_json_path = f"{dataset_name}_triplet_model_architecture.json"
+    with open(triplet_model_json_path, 'w') as json_file:
+        json_file.write(best_triplet_model.to_json())
+    print(f"✅ Full triplet model architecture saved as {triplet_model_json_path}")
+
+    triplet_model_weights_path = f"{dataset_name}_triplet_model.weights.h5"
+    best_triplet_model.save_weights(triplet_model_weights_path)
+    print(f"🚀 Full triplet model weights saved as {triplet_model_weights_path}")
+
+    base_network_json_path = f"{dataset_name}_base_network_architecture.json"
+    with open(base_network_json_path, 'w') as json_file:
+        json_file.write(best_base_network.to_json())
+    print(f"✅ Base network architecture saved as {base_network_json_path}")
+
+    base_network_weights_path = f"{dataset_name}_base_network.weights.h5"
+    best_base_network.save_weights(base_network_weights_path)
+    print(f"🚀 Base network weights saved as {base_network_weights_path}")
+
     # ✅ Recompute embeddings from trained model
     all_images, all_labels = generator.get_all_data_with_labels()
-    embeddings = base_network.predict(all_images, verbose=0)
+    embeddings = best_base_network.predict(all_images, verbose=0)
 
-    # ============================
-    # ✅ Prepare Reference and Query Embeddings (Real-World Evaluation Setup)
     # ============================
     print(f"\n🧪 Real-World Evaluation for {dataset_name}")
 
@@ -711,59 +766,59 @@ for dataset_name, dataset_config in datasets.items():
     plt.tight_layout()
     plt.savefig(f"{dataset_name}_distance_distribution.png")  # Save image
 
-    # ============================
-    # 🧪 SMOTE Analysis
-    # ============================
-    print("\n🧪 Running SMOTE on full training embeddings for augmented analysis...")
+    # # ============================
+    # # 🧪 SMOTE Analysis
+    # # ============================
+    # print("\n🧪 Running SMOTE on full training embeddings for augmented analysis...")
 
-    # Step 1: Get full training data again
-    all_images, all_labels = generator.get_all_data_with_labels()
-    image_embeddings = base_network.predict(all_images)
+    # # Step 1: Get full training data again
+    # all_images, all_labels = generator.get_all_data_with_labels()
+    # image_embeddings = base_network.predict(all_images)
 
-    # Step 2: Check class distribution before applying SMOTE
-    label_counts = Counter(all_labels)
-    print(f"🔍 Class distribution before SMOTE: {label_counts}")
+    # # Step 2: Check class distribution before applying SMOTE
+    # label_counts = Counter(all_labels)
+    # print(f"🔍 Class distribution before SMOTE: {label_counts}")
 
-    min_class = min(label_counts.values())
-    max_class = max(label_counts.values())
+    # min_class = min(label_counts.values())
+    # max_class = max(label_counts.values())
 
-    if min_class < max_class:
-        # Imbalanced, apply SMOTE
-        smote = SMOTE(random_state=42)
-        smote_embeddings, smote_labels = smote.fit_resample(image_embeddings, all_labels)
-        print("✅ SMOTE applied for evaluation.")
-        print(f"🔢 Original embeddings: {len(image_embeddings)} | SMOTE-enhanced: {len(smote_embeddings)}")
-    else:
-        # Balanced — skip SMOTE
-        smote_embeddings = image_embeddings
-        smote_labels = all_labels
-        print("⚠️ Dataset is already balanced — SMOTE not applied.")
-        print(f"📦 Embeddings remain the same: {len(smote_embeddings)}")
+    # if min_class < max_class:
+    #     # Imbalanced, apply SMOTE
+    #     smote = SMOTE(random_state=42)
+    #     smote_embeddings, smote_labels = smote.fit_resample(image_embeddings, all_labels)
+    #     print("✅ SMOTE applied for evaluation.")
+    #     print(f"🔢 Original embeddings: {len(image_embeddings)} | SMOTE-enhanced: {len(smote_embeddings)}")
+    # else:
+    #     # Balanced — skip SMOTE
+    #     smote_embeddings = image_embeddings
+    #     smote_labels = all_labels
+    #     print("⚠️ Dataset is already balanced — SMOTE not applied.")
+    #     print(f"📦 Embeddings remain the same: {len(smote_embeddings)}")
 
 
     # Step 3: Plot t-SNE of Real vs SMOTE embeddings
     # ============================
 
-    def plot_tsne(real_emb, smote_emb, real_labels, smote_labels, title="t-SNE of Real vs SMOTE Embeddings"):
-        subset_real = real_emb[:1000]
-        subset_fake = smote_emb[-1000:]
-        labels = ['Real'] * len(subset_real) + ['SMOTE'] * len(subset_fake)
-        combined = np.vstack([subset_real, subset_fake])
+    # def plot_tsne(real_emb, smote_emb, real_labels, smote_labels, title="t-SNE of Real vs SMOTE Embeddings"):
+    #     subset_real = real_emb[:1000]
+    #     subset_fake = smote_emb[-1000:]
+    #     labels = ['Real'] * len(subset_real) + ['SMOTE'] * len(subset_fake)
+    #     combined = np.vstack([subset_real, subset_fake])
 
-        tsne = TSNE(n_components=2, random_state=42)
-        reduced = tsne.fit_transform(combined)
+    #     tsne = TSNE(n_components=2, random_state=42)
+    #     reduced = tsne.fit_transform(combined)
 
-        plt.figure(figsize=(8, 6))
-        plt.scatter(reduced[:len(subset_real), 0], reduced[:len(subset_real), 1], alpha=0.5, label='Real', s=10)
-        plt.scatter(reduced[len(subset_real):, 0], reduced[len(subset_real):, 1], alpha=0.5, label='SMOTE', s=10)
-        plt.title(title)
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(f"{dataset_name}_tsne_real_vs_smote.png")
-        #plt.show()
+    #     plt.figure(figsize=(8, 6))
+    #     plt.scatter(reduced[:len(subset_real), 0], reduced[:len(subset_real), 1], alpha=0.5, label='Real', s=10)
+    #     plt.scatter(reduced[len(subset_real):, 0], reduced[len(subset_real):, 1], alpha=0.5, label='SMOTE', s=10)
+    #     plt.title(title)
+    #     plt.legend()
+    #     plt.grid(True)
+    #     plt.tight_layout()
+    #     plt.savefig(f"{dataset_name}_tsne_real_vs_smote.png")
+    #     #plt.show()
 
-    plot_tsne(image_embeddings, smote_embeddings, all_labels, smote_labels)
+    # plot_tsne(image_embeddings, smote_embeddings, all_labels, smote_labels)
     # ============================
     # 📝 Save Metrics to File
     # ============================
@@ -801,8 +856,9 @@ for dataset_name, dataset_config in datasets.items():
         noisy_images, noisy_labels = generator.get_unbatched_data(noisy=True)
         # Evaluate both
 
-        clean_acc, clean_f1 = evaluate_threshold(base_network, clean_images, clean_labels, threshold)
-        noisy_acc, noisy_f1 = evaluate_threshold(base_network, noisy_images, noisy_labels, threshold)
+        clean_acc, clean_f1 = evaluate_threshold_with_given_threshold(base_network, clean_images, clean_labels, threshold)
+        noisy_acc, noisy_f1 = evaluate_threshold_with_given_threshold(base_network, noisy_images, noisy_labels, threshold)
+
 
         print(f"✅ Clean Accuracy: {clean_acc:.4f}, F1: {clean_f1:.4f}")
         print(f"⚠ Noisy Accuracy: {noisy_acc:.4f}, F1: {noisy_f1:.4f}")
@@ -838,12 +894,20 @@ for dataset_name, dataset_config in datasets.items():
 # Place cross-dataset evaluation block here to run **after** all training and evaluation:
 print("\n🧪 Cross-Dataset Evaluation...")
 saved_models = {}
+
 for dataset_name in datasets:
-    weight_file = f"{dataset_name}.weights.h5"
-    if os.path.exists(weight_file):
+    # 🔍 Find base network weights saved with margin (e.g., CEDAR_base_network_margin0.5.weights.h5)
+    matching_files = [
+        f for f in os.listdir()
+        if f.startswith(f"{dataset_name}_base_network_margin") and f.endswith(".weights.h5")
+    ]
+    
+    if matching_files:
+        weight_file = sorted(matching_files)[-1]  # last file alphabetically (e.g., highest margin)
         saved_models[dataset_name] = weight_file
+        print(f"✅ Found weight file for {dataset_name}: {weight_file}")
     else:
-        print(f"⚠️ Weight file not found for {dataset_name}: {weight_file}")
+        print(f"⚠️ No weight file found for {dataset_name}")
 
 print("\n🧪 Starting Cross-Dataset Evaluation...\n")
 cross_results = []

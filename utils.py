@@ -81,7 +81,28 @@ def evaluate_threshold(base_model, generator, embedding_size):
     except Exception as e:
         print(f"❌ Error in evaluate_threshold: {e}")
         return None
-        
+
+def evaluate_threshold_with_given_threshold(base_model, images, labels, threshold):
+    try:
+        embeddings = base_model.predict(images, verbose=0)
+        reference_embeddings = embeddings[np.array(labels) == 0]
+
+        if len(reference_embeddings) == 0:
+            print("⚠️ No reference (genuine) samples available.")
+            return -1, -1
+
+        distances = [np.min(np.linalg.norm(reference_embeddings - emb, axis=1)) for emb in embeddings]
+        y_pred = [1 if d < threshold else 0 for d in distances]
+
+        acc = accuracy_score(labels, y_pred)
+        f1 = f1_score(labels, y_pred)
+
+        return acc, f1
+
+    except Exception as e:
+        print(f"❌ Error in evaluate_threshold_with_given_threshold: {e}")
+        return -1, -1
+
 # Add noise to an image
 def add_noise_to_image(img):
     h, w, _ = img.shape
