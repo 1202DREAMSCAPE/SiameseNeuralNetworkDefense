@@ -268,82 +268,55 @@ for dataset_name, dataset_config in datasets.items():
          .prefetch(tf.data.AUTOTUNE)
 
         best_loss = float("inf")
-        best_margin = None
 
         steps_per_epoch = max(1, len(anchor_imgs) // generator.batch_sz)
         print(f"🟢 Steps Per Epoch: {steps_per_epoch}, Batch Size: {generator.batch_sz}")
 
-        for margin in [0.2, 0.3, 0.5, 0.7, 1.0]:
-            print(f"\n🔁 Training with margin = {margin}")
-            
-            triplet_model = create_triplet_network((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
-            triplet_model.compile(
-                optimizer=RMSprop(learning_rate=0.001),
-                loss=get_triplet_loss(margin=margin)
-            )
+        margin = 1.0  # Fixed margin value
 
-            early_stopping = EarlyStopping(
-                monitor='loss',
-                patience=10,
-                restore_best_weights=True,
-                verbose=1
-            )
+        triplet_model = create_triplet_network((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
+        triplet_model.compile(
+            optimizer=RMSprop(learning_rate=0.001),
+            loss=get_triplet_loss(margin=margin)
+        )
 
-            history = triplet_model.fit(
-                train_data,
-                epochs=1,
-                steps_per_epoch=steps_per_epoch,
-                callbacks=[early_stopping],
-                verbose=1
-            )
+        early_stopping = EarlyStopping(
+            monitor='loss',
+            patience=10,
+            restore_best_weights=True,
+            verbose=1
+        )
 
-            final_loss = history.history['loss'][-1]
-            print(f"📉 Final training loss for margin {margin}: {final_loss:.4f}")
+        history = triplet_model.fit(
+            train_data,
+            epochs=40,
+            steps_per_epoch=steps_per_epoch,
+            callbacks=[early_stopping],
+            verbose=1
+        )
 
-            if final_loss < best_loss:
-                best_loss = final_loss
-                best_margin = margin
-                triplet_model.save_weights(f"{dataset_name}_triplet_model_margin{margin:.1f}.weights.h5")
-                base_network.save_weights(f"{dataset_name}_base_network_margin{margin:.1f}.weights.h5")
-                print(f"✅ Saved best model for margin {margin:.1f}")
+        # ✅ Save only the weights (not the full model) to avoid deserialization errors
+        triplet_model.save_weights(f"{dataset_name}_triplet_model.weights.h5")
+        base_network.save_weights(f"{dataset_name}_base_network.weights.h5")
+
+        print(f"✅ Saved triplet model weights: {dataset_name}_triplet_model.weights.h5")
+        print(f"✅ Saved base network weights: {dataset_name}_base_network.weights.h5")
 
     except Exception as e:
         print(f"❌ Error during training with HNM on {dataset_name}: {e}")
         continue
 
-    print(f"\n🏁 Best margin for {dataset_name}: {best_margin} with loss = {best_loss:.4f}")
-    with open("best_margins_log.txt", "a") as log_file:
-        log_file.write(f"{dataset_name}: Best Margin = {best_margin}, Loss = {best_loss:.4f}\n")
+        # ✅ Rebuild the model architectures before loading weights
+    triplet_model = create_triplet_network((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
+    triplet_model.load_weights(f"{dataset_name}_triplet_model.weights.h5")
 
-    # After margin sweep completes, reload the best model
-    best_triplet_model = create_triplet_network((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
-    best_triplet_model.load_weights(f"{dataset_name}_triplet_model_margin{best_margin:.1f}.weights.h5")
-
-    best_base_network = create_base_network_signet((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
-    best_base_network.load_weights(f"{dataset_name}_base_network_margin{best_margin:.1f}.weights.h5")
-
-    # ✅ Save full architectures (optional but useful)
-    triplet_model_json_path = f"{dataset_name}_triplet_model_architecture.json"
-    with open(triplet_model_json_path, 'w') as json_file:
-        json_file.write(best_triplet_model.to_json())
-    print(f"✅ Full triplet model architecture saved as {triplet_model_json_path}")
-
-    triplet_model_weights_path = f"{dataset_name}_triplet_model.weights.h5"
-    best_triplet_model.save_weights(triplet_model_weights_path)
-    print(f"🚀 Full triplet model weights saved as {triplet_model_weights_path}")
-
-    base_network_json_path = f"{dataset_name}_base_network_architecture.json"
-    with open(base_network_json_path, 'w') as json_file:
-        json_file.write(best_base_network.to_json())
-    print(f"✅ Base network architecture saved as {base_network_json_path}")
-
-    base_network_weights_path = f"{dataset_name}_base_network.weights.h5"
-    best_base_network.save_weights(base_network_weights_path)
-    print(f"🚀 Base network weights saved as {base_network_weights_path}")
+    base_network = create_base_network_signet((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
+    base_network.load_weights(f"{dataset_name}_base_network.weights.h5")
 
     # ✅ Recompute embeddings from trained model
     all_images, all_labels = generator.get_all_data_with_labels()
-    embeddings = best_base_network.predict(all_images, verbose=0)
+    embeddings = base_network.predict(all_images, verbose=0)
+
 
     # ============================
     print(f"\n🧪 Real-World Evaluation for {dataset_name}")
@@ -379,6 +352,13 @@ for dataset_name, dataset_config in datasets.items():
         reference_emb = base_network.predict(np.expand_dims(reference_img, axis=0), verbose=0)[0]
         reference_embeddings.append(reference_emb)
         reference_labels.append(writer)
+
+        # Ensure the folder exists
+        os.makedirs("ref_labels_embeds", exist_ok=True)
+
+        # Save to the folder
+        np.save(f"ref_labels_embeds/{dataset_name}_ref_embs.npy", np.array(reference_embeddings))
+        np.save(f"ref_labels_embeds/{dataset_name}_ref_labels.npy", np.array(reference_labels))
 
         # Remaining genuine signatures as positive queries
         for img_path in tqdm(genuine_files[1:], leave=False, desc=f"Writer {writer} - Genuine"):
@@ -766,59 +746,6 @@ for dataset_name, dataset_config in datasets.items():
     plt.tight_layout()
     plt.savefig(f"{dataset_name}_distance_distribution.png")  # Save image
 
-    # # ============================
-    # # 🧪 SMOTE Analysis
-    # # ============================
-    # print("\n🧪 Running SMOTE on full training embeddings for augmented analysis...")
-
-    # # Step 1: Get full training data again
-    # all_images, all_labels = generator.get_all_data_with_labels()
-    # image_embeddings = base_network.predict(all_images)
-
-    # # Step 2: Check class distribution before applying SMOTE
-    # label_counts = Counter(all_labels)
-    # print(f"🔍 Class distribution before SMOTE: {label_counts}")
-
-    # min_class = min(label_counts.values())
-    # max_class = max(label_counts.values())
-
-    # if min_class < max_class:
-    #     # Imbalanced, apply SMOTE
-    #     smote = SMOTE(random_state=42)
-    #     smote_embeddings, smote_labels = smote.fit_resample(image_embeddings, all_labels)
-    #     print("✅ SMOTE applied for evaluation.")
-    #     print(f"🔢 Original embeddings: {len(image_embeddings)} | SMOTE-enhanced: {len(smote_embeddings)}")
-    # else:
-    #     # Balanced — skip SMOTE
-    #     smote_embeddings = image_embeddings
-    #     smote_labels = all_labels
-    #     print("⚠️ Dataset is already balanced — SMOTE not applied.")
-    #     print(f"📦 Embeddings remain the same: {len(smote_embeddings)}")
-
-
-    # Step 3: Plot t-SNE of Real vs SMOTE embeddings
-    # ============================
-
-    # def plot_tsne(real_emb, smote_emb, real_labels, smote_labels, title="t-SNE of Real vs SMOTE Embeddings"):
-    #     subset_real = real_emb[:1000]
-    #     subset_fake = smote_emb[-1000:]
-    #     labels = ['Real'] * len(subset_real) + ['SMOTE'] * len(subset_fake)
-    #     combined = np.vstack([subset_real, subset_fake])
-
-    #     tsne = TSNE(n_components=2, random_state=42)
-    #     reduced = tsne.fit_transform(combined)
-
-    #     plt.figure(figsize=(8, 6))
-    #     plt.scatter(reduced[:len(subset_real), 0], reduced[:len(subset_real), 1], alpha=0.5, label='Real', s=10)
-    #     plt.scatter(reduced[len(subset_real):, 0], reduced[len(subset_real):, 1], alpha=0.5, label='SMOTE', s=10)
-    #     plt.title(title)
-    #     plt.legend()
-    #     plt.grid(True)
-    #     plt.tight_layout()
-    #     plt.savefig(f"{dataset_name}_tsne_real_vs_smote.png")
-    #     #plt.show()
-
-    # plot_tsne(image_embeddings, smote_embeddings, all_labels, smote_labels)
     # ============================
     # 📝 Save Metrics to File
     # ============================
@@ -890,72 +817,3 @@ for dataset_name, dataset_config in datasets.items():
             f.write(f"Hard Negative Ratio: {hn_ratio:.4f}\n")
             f.write(f"Hard Negative Precision: {hn_precision:.4f}\n")
             f.write(f"Hard Negative Recall: {hn_recall:.4f}\n")
-
-# Place cross-dataset evaluation block here to run **after** all training and evaluation:
-print("\n🧪 Cross-Dataset Evaluation...")
-saved_models = {}
-
-for dataset_name in datasets:
-    # 🔍 Find base network weights saved with margin (e.g., CEDAR_base_network_margin0.5.weights.h5)
-    matching_files = [
-        f for f in os.listdir()
-        if f.startswith(f"{dataset_name}_base_network_margin") and f.endswith(".weights.h5")
-    ]
-    
-    if matching_files:
-        weight_file = sorted(matching_files)[-1]  # last file alphabetically (e.g., highest margin)
-        saved_models[dataset_name] = weight_file
-        print(f"✅ Found weight file for {dataset_name}: {weight_file}")
-    else:
-        print(f"⚠️ No weight file found for {dataset_name}")
-
-print("\n🧪 Starting Cross-Dataset Evaluation...\n")
-cross_results = []
-
-for train_name, weight_path in saved_models.items():
-    print(f"\n🔁 Using {train_name} model")
-
-    # Load the trained base network
-    base_model = create_base_network_signet((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
-    base_model.load_weights(weight_path)
-
-    for test_name, config in datasets.items():
-        if train_name == test_name:
-            continue
-
-        print(f"🔎 Testing on {test_name}")
-        generator = SignatureDataGenerator(
-            dataset={test_name: config},
-            img_height=155,
-            img_width=220,
-            batch_sz=32
-        )
-
-        result = evaluate_threshold(base_model, generator, EMBEDDING_SIZE)
-
-        if result is None:
-            print(f"⚠️ Skipping {test_name} due to missing evaluation data.")
-            continue
-
-        acc, f1, auc, far, frr, threshold = result
-        print(f"✅ {train_name} → {test_name}: Acc={acc:.4f}, F1={f1:.4f}, AUC={auc:.4f}, Threshold={threshold:.4f}")
-        cross_results.append([train_name, test_name, acc, f1, auc, threshold])
-
-# Save cross-dataset results
-if cross_results:
-    df = pd.DataFrame(cross_results, columns=["Train Dataset", "Test Dataset", "Accuracy", "F1 Score", "ROC AUC", "Threshold Used"])
-    df.to_csv("cross_dataset_evaluation.csv", index=False)
-    print("\n📄 Cross-dataset evaluation saved to cross_dataset_evaluation.csv")
-
-    # Create heatmap of accuracy
-    heatmap_data = df.pivot(index="Train Dataset", columns="Test Dataset", values="Accuracy")
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(heatmap_data, annot=True, fmt=".4f", cmap="YlGnBu", cbar_kws={'label': 'Accuracy'})
-    plt.title("Cross-Dataset Evaluation – Accuracy Heatmap")
-    plt.xlabel("Test Dataset")
-    plt.ylabel("Train Dataset")
-    plt.tight_layout()
-    plt.savefig("cross_dataset_accuracy_heatmap.png")
-    print("✅ Heatmap saved as cross_dataset_accuracy_heatmap.png")
-else:
-    print("\n⚠️ No cross-dataset results generated.")

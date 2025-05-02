@@ -5,3 +5,6 @@
 /CLAHE_Comparison_CEDAR
 /CLAHE_Comparison_BHSig260_Bengali
 /CLAHE_Comparison_BHSig260_Hindi
+BHSig260_Bengali_base_network.weights.h5
+BHSig260_Hindi_base_network.weights.h5
+CEDAR_base_network.weights.h5

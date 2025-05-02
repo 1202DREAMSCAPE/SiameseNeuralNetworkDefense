@@ -131,7 +131,7 @@ def evaluate_sop3(clean_emb, noisy_emb, clean_labels, threshold):
 # ========== CONFIG ==========
 IMG_SHAPE = (155, 220, 3)
 BATCH_SIZE = 32
-EPOCHS = 1
+EPOCHS = 40
 MARGIN = 1.0
 
 datasets = {
@@ -290,3 +290,73 @@ for dataset_name, config in datasets.items():
     plt.close()
 
 print(f"📋 Finished evaluation for {dataset_name}. Current CSV updated.\n")
+
+# ========== Cross-Dataset Evaluation ==========
+print("\n🔁 Starting Cross-Dataset Evaluation...")
+cross_results = []
+
+for train_name in datasets.keys():
+    weight_path = f"models/{train_name}_model.h5"
+    if not os.path.exists(weight_path):
+        print(f"❌ Model not found for {train_name}, skipping.")
+        continue
+
+    base_model = create_base_network_signet(IMG_SHAPE)
+    base_model.load_weights(weight_path)
+
+    for test_name, config in datasets.items():
+        print(f"\n🔍 {train_name} → {test_name}")
+        generator = SignatureDataGenerator(
+            dataset={test_name: config},
+            img_height=IMG_SHAPE[0],
+            img_width=IMG_SHAPE[1],
+            batch_sz=BATCH_SIZE
+        )
+
+        test_images, test_labels = generator.get_unbatched_data()
+        embeddings = base_model.predict(test_images, verbose=0)
+
+        # Reference mean embedding of genuine
+        genuine_embs = embeddings[np.array(test_labels) == 0]
+        ref = np.mean(genuine_embs, axis=0)
+        distances = np.linalg.norm(embeddings - ref, axis=1)
+
+        dmax = np.max(distances)
+        dmin = np.min(distances)
+        nsame = np.sum(test_labels == 0)
+        ndiff = np.sum(test_labels == 1)
+
+        step = 0.001
+        max_acc = 0
+        best_thr = dmin
+        for d in np.arange(dmin, dmax + step, step):
+            idx1 = distances <= d
+            idx2 = distances > d
+            tpr = float(np.sum(np.array(test_labels)[idx1] == 0)) / nsame
+            tnr = float(np.sum(np.array(test_labels)[idx2] == 1)) / ndiff
+            acc = 0.5 * (tpr + tnr)
+            if acc > max_acc:
+                max_acc = acc
+                best_thr = d
+
+        y_pred = (distances < best_thr).astype(int)
+        y_true = (np.array(test_labels) == 0).astype(int)
+        f1 = f1_score(y_true, y_pred)
+        auc = roc_auc_score(y_true, -distances)
+
+        cross_results.append([train_name, test_name, max_acc, f1, auc, best_thr])
+        print(f"✅ Acc={max_acc:.4f} | F1={f1:.4f} | AUC={auc:.4f} | Thr={best_thr:.4f}")
+
+# Save to CSV
+df = pd.DataFrame(cross_results, columns=["Train Dataset", "Test Dataset", "Accuracy", "F1 Score", "ROC AUC", "Best Threshold"])
+df.to_csv("SigNet_Baseline_CrossDataset.csv", index=False)
+print("📄 Cross-dataset results saved to SigNet_Baseline_CrossDataset.csv")
+
+# Plot Heatmap
+plt.figure(figsize=(8, 6))
+heatmap_data = df.pivot(index="Train Dataset", columns="Test Dataset", values="Accuracy")
+sns.heatmap(heatmap_data, annot=True, fmt=".4f", cmap="Blues")
+plt.title("SigNet Baseline Cross-Dataset Accuracy")
+plt.tight_layout()
+plt.savefig("SigNet_Baseline_Cross_Heatmap.png")
+print("✅ Cross-dataset heatmap saved.")
