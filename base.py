@@ -187,6 +187,9 @@ for dataset_name, config in datasets.items():
         verbose=1
     )
 
+    metrics_dir = 'baseline_metrics'
+    os.makedirs(metrics_dir, exist_ok=True)
+
     # ========== Training ==========
     start_time = time.time()
     history = model.fit(
@@ -197,6 +200,18 @@ for dataset_name, config in datasets.items():
         callbacks=[early_stopping]
     )
     train_time = time.time() - start_time
+
+    # ========== Save Weights ==========
+    weights_dir = 'base_weights'
+    os.makedirs(weights_dir, exist_ok=True)
+
+    # Save only weights
+    model.save_weights(os.path.join(weights_dir, f"{dataset_name}_siamese_model.weights.h5"))
+    signet_network = base_network  # renamed for clarity
+    signet_network.save_weights(os.path.join(weights_dir, f"{dataset_name}_signet_network.weights.h5"))
+
+    print(f"✅ Saved Siamese model weights: {dataset_name}_siamese_model.weights.h5")
+    print(f"✅ Saved signet network weights: {dataset_name}_signet_network.weights.h5")
 
     # ========== Embedding Extraction ==========
     test_images, test_labels = generator.get_unbatched_data()
@@ -242,11 +257,6 @@ for dataset_name, config in datasets.items():
         "F1_Score": f1
     })
 
-    model_dir = 'models'
-    if not os.path.exists(model_dir):
-        os.makedirs(model_dir)
-    model_path = os.path.join(model_dir, f'{dataset_name}_model.h5')
-    model.save(model_path)
     # ========== Save Results to CSV ==========
     # ✅ Save CSV immediately after each dataset completes:
     pd.DataFrame(results).to_csv("SigNet_Baseline_SOP_Results.csv", index=False)

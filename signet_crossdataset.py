@@ -9,6 +9,8 @@ from SigNet_v1 import create_base_network_signet_dilated
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, confusion_matrix
 
 EMBEDDING_SIZE = 128
+results_dir = 'cross_dataset_enhanced'
+os.makedirs(results_dir, exist_ok=True)
 
 datasets = {
     "CEDAR": {
@@ -106,7 +108,7 @@ for train_name, weight_path in saved_models.items():
             })
 
         # Save to CSV
-        csv_name = f"{train_name}_to_{test_name}_sample_predictions.csv"
+        csv_name = os.path.join(results_dir, f"{train_name}_to_{test_name}_sample_predictions.csv")
         pd.DataFrame(results_per_sample).to_csv(csv_name, index=False)
         print(f"📄 Saved detailed predictions to: {csv_name}")
 
@@ -115,14 +117,14 @@ for train_name, weight_path in saved_models.items():
 # Save results
 if cross_results:
     df = pd.DataFrame(cross_results, columns=["Train Dataset", "Test Dataset", "Accuracy", "F1 Score", "ROC AUC", "Best Threshold"])
-    df.to_csv("signet_style_cross_eval.csv", index=False)
+    df.to_csv(os.path.join(results_dir, "signet_style_cross_eval.csv"), index=False)  
 
     plt.figure(figsize=(8, 6))
     heatmap_data = df.pivot(index="Train Dataset", columns="Test Dataset", values="Accuracy")
     sns.heatmap(heatmap_data, annot=True, fmt=".4f", cmap="Greens")
     plt.title("Cross-Dataset Accuracy (SigNet ROC Threshold)")
     plt.tight_layout()
-    plt.savefig("signet_style_cross_heatmap.png")
+    plt.savefig(os.path.join(results_dir, "signet_style_cross_heatmap.png"))
     print("✅ Evaluation CSV + heatmap saved.")
 else:
     print("⚠️ No evaluation results saved.")
