@@ -10,4 +10,5 @@ matplotlib
 scikit-image
 joblib
 scipy
+seaborn
 pandas

@@ -88,6 +88,7 @@ def evaluate_sop1(genuine_d, forged_d, binary_labels, distances):
         eer = brentq(lambda x: 1. - x - eer_func(x), 0., 1.)
     except Exception:
         eer = -1
+    
     metrics.update({
         'SOP1_EER': eer,
         'SOP1_AUC_ROC': roc_auc_score(binary_labels, -np.array(distances)),

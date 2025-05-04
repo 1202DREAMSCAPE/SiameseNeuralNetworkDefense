@@ -1,5 +1,6 @@
 import os
 import numpy as np
+from sklearn.decomposition import PCA
 import tensorflow as tf
 import time
 import random
@@ -76,24 +77,17 @@ def evaluate_sop1(genuine_d, forged_d, binary_labels, distances):
     except Exception:
         eer = -1
 
-    # Safe threshold selection
-    optimal_idx = np.argmax(tpr - fpr)
-    if optimal_idx >= len(thresholds) or np.isnan(thresholds[optimal_idx]) or np.isinf(thresholds[optimal_idx]):
-        best_threshold = np.median(distances)
-    else:
-        best_threshold = thresholds[optimal_idx]
-
     metrics.update({
         'SOP1_EER': eer,
         'SOP1_AUC_ROC': roc_auc_score(binary_labels, -np.array(distances)),
-        'SOP1_Threshold': best_threshold
+        'SOP1_Threshold': thresholds[np.argmax(tpr - fpr)]
     })
 
     hist_gen, bins = np.histogram(genuine_d, bins=30, density=True)
     hist_forg, _ = np.histogram(forged_d, bins=bins, density=True)
     metrics['SOP1_Overlap_Area'] = np.sum(np.minimum(hist_gen, hist_forg)) * (bins[1] - bins[0])
 
-    preds = [1 if d > best_threshold else 0 for d in distances]
+    preds = [1 if d > thresholds[np.argmax(tpr - fpr)] else 0 for d in distances]
     cm = confusion_matrix(binary_labels, preds)
     if cm.shape == (2, 2):
         TN, FP, FN, TP = cm.ravel()
@@ -409,13 +403,28 @@ for dataset_name, dataset_config in datasets.items():
         genuine_dists = [d for d, l in zip(distances, binary_labels) if l == 1]
         forged_dists = [d for d, l in zip(distances, binary_labels) if l == 0]
 
+        # === KDE-Based Threshold (Overlap Point) ===
+        genuine_kde = gaussian_kde(genuine_dists)
+        forged_kde = gaussian_kde(forged_dists)
+        x_vals = np.linspace(min(min(genuine_dists), min(forged_dists)),
+                            max(max(genuine_dists), max(forged_dists)), 1000)
+        g_kde_vals = genuine_kde(x_vals)
+        f_kde_vals = forged_kde(x_vals)
+
+        # Find intersection (min difference between two densities)
+        kde_threshold_idx = np.argmin(np.abs(g_kde_vals - f_kde_vals))
+        kde_threshold = x_vals[kde_threshold_idx]
+
+        print(f"📉 KDE-based Threshold: {kde_threshold:.4f}")
+
+
         print("\n=== Embedding Diagnostics ===")
         print(f"Genuine distances - Min: {np.min(genuine_dists):.4f}, Max: {np.max(genuine_dists):.4f}")
         print(f"Forged distances - Min: {np.min(forged_dists):.4f}, Max: {np.max(forged_dists):.4f}")
 
         # Calculate SOP1 threshold
         sop1 = evaluate_sop1(genuine_dists, forged_dists, binary_labels, distances)
-        threshold = sop1['SOP1_Threshold']
+        threshold = kde_threshold
         print(f"🔑 Optimal Threshold (SOP1): {threshold:.4f}")
 
         y_pred_thresh = [1 if d <= threshold else 0 for d in distances]
@@ -502,7 +511,7 @@ for dataset_name, dataset_config in datasets.items():
         forged_density = forged_kde(x)
 
         # Use SOP1 threshold for all evaluations
-        threshold = sop1['SOP1_Threshold']
+        threshold = kde_threshold
 
         final_results = []
         for i, query in enumerate(query_embeddings):

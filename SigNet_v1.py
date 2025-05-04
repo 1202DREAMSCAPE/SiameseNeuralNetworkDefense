@@ -1,7 +1,5 @@
-import os
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import regularizers
 from tensorflow.keras.models import Sequential, Model
 from tensorflow.keras.layers import Dense, Dropout, Input, Lambda, Flatten, Conv2D, MaxPooling2D, BatchNormalization, ZeroPadding2D
 from tensorflow.keras.optimizers import RMSprop
@@ -100,40 +98,37 @@ def generate_hard_mined_triplets(self, base_network, batch_size=32):
 
 # ✅ Define the SigNet Base Network Architecture with Multi-Scale Feature Learning
 def create_base_network_signet_dilated(input_shape, embedding_dim=128):
+    """
+    Builds the base convolutional neural network with dilated convolutions.
+    """
     seq = Sequential()
     
-    # Input
-    seq.add(Input(shape=input_shape))
-
-    # First Conv block
-    seq.add(Conv2D(96, (11, 11), activation='relu', strides=(4, 4)))
-    seq.add(BatchNormalization())
-    seq.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2)))
-
-    # Second Conv block
-    seq.add(ZeroPadding2D((2, 2)))
-    seq.add(Conv2D(256, (5, 5), activation='relu'))
-    seq.add(BatchNormalization())
-    seq.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2)))
+    # First convolutional block
+    seq.add(Conv2D(96, (11, 11), activation='relu', strides=(4, 4), input_shape=input_shape))
+    seq.add(MaxPooling2D((2, 2), strides=(1, 1)))  # Adjusted pooling
+    print(f"Layer Output Shape after First Pooling: {seq.output_shape}")
+    
+    # Second convolutional block with dilation
+    seq.add(Conv2D(256, (5, 5), activation='relu', dilation_rate=2))
+    seq.add(MaxPooling2D((2, 2), strides=(1, 1)))  # Adjusted pooling
     seq.add(Dropout(0.3))
-
-    # Third Conv block
-    seq.add(ZeroPadding2D((1, 1)))
+    print(f"Layer Output Shape after Second Pooling: {seq.output_shape}")
+    
+    # Third convolutional block
     seq.add(Conv2D(384, (3, 3), activation='relu'))
-    seq.add(ZeroPadding2D((1, 1)))
     seq.add(Conv2D(256, (3, 3), activation='relu'))
-    seq.add(MaxPooling2D(pool_size=(3, 3), strides=(2, 2)))
+    seq.add(MaxPooling2D((2, 2), strides=(1, 1)))  # Adjusted pooling
     seq.add(Dropout(0.3))
-
-    # Fully Connected layers
+    print(f"Layer Output Shape after Third Pooling: {seq.output_shape}")
+    
+    # Fully connected layers
     seq.add(Flatten())
-    seq.add(Dense(1024, activation='relu', kernel_regularizer=regularizers.l2(0.0005)))
+    seq.add(Dense(1024, activation='relu'))
     seq.add(Dropout(0.5))
-    seq.add(Dense(embedding_dim, activation='linear', kernel_regularizer=regularizers.l2(0.0005), name="embedding_layer"))
+    seq.add(Dense(embedding_dim, activation='linear', name="embedding_layer"))
 
-    # Normalize output
+    # ✅ Normalize the output to unit length
     seq.add(Lambda(lambda x: K.l2_normalize(x, axis=1), name="l2_normalized"))
-
     return seq
 
 # ✅ Define the Triplet Network (Updated)
