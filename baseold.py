@@ -1,9 +1,7 @@
 import os
 import numpy as np
 import tensorflow as tf
-import random
 from tensorflow.keras import layers, Model, Input, Sequential
-from tensorflow.keras.utils import register_keras_serializable
 from tensorflow.keras.optimizers import RMSprop
 from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.metrics import (
@@ -15,24 +13,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import time
 import cv2
-import seaborn as sns
 from SignatureDataGenerator import SignatureDataGenerator
-import numpy as np
-
-np.random.seed(1337)
-random.seed(1337)
-
-@register_keras_serializable()
-def euclidean_distance(vectors):
-    x, y = vectors
-    return tf.sqrt(tf.maximum(tf.reduce_sum(tf.square(x - y), axis=1, keepdims=True), tf.keras.backend.epsilon()))
-
-def get_contrastive_loss(margin=1.0):
-    def contrastive_loss(y_true, y_pred):
-        square_pred = tf.square(y_pred)
-        margin_square = tf.square(tf.maximum(margin - y_pred, 0))
-        return tf.reduce_mean(y_true * square_pred + (1 - y_true) * margin_square)
-    return contrastive_loss
 
 # Preprocessing
 def preprocess_image_simple(self, img_path):
@@ -50,6 +31,17 @@ def preprocess_image_simple(self, img_path):
         return np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
 
 SignatureDataGenerator.preprocess_image = preprocess_image_simple
+
+def euclidean_distance(vectors):
+    x, y = vectors
+    return tf.sqrt(tf.maximum(tf.reduce_sum(tf.square(x - y), axis=1, keepdims=True), tf.keras.backend.epsilon()))
+
+def get_contrastive_loss(margin=1.0):
+    def contrastive_loss(y_true, y_pred):
+        square_pred = tf.square(y_pred)
+        margin_square = tf.square(tf.maximum(margin - y_pred, 0))
+        return tf.reduce_mean(y_true * square_pred + (1 - y_true) * margin_square)
+    return contrastive_loss
 
 def create_base_network_signet(input_shape):
     model = Sequential([
@@ -71,7 +63,7 @@ def create_base_network_signet(input_shape):
         layers.Flatten(),
         layers.Dense(1024, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0005)),
         layers.Dropout(0.5),
-        layers.Dense(128, activation='linear', kernel_regularizer=tf.keras.regularizers.l2(0.0005))
+        layers.Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0005))
     ])
     return model
 
@@ -106,8 +98,8 @@ def evaluate_sop1(genuine_d, forged_d, binary_labels, distances):
         metrics['SOP1_FAR'], metrics['SOP1_FRR'] = np.nan, np.nan
     return metrics
 
-def evaluate_sop2(embeddings, labels):
-    metrics = {}
+def evaluate_sop2(embeddings, labels, query_time):
+    metrics = {'SOP2_Time_Per_Query': query_time}
     sample_size = min(1000, len(embeddings))
     if sample_size > 10:
         sample_idx = np.random.choice(len(embeddings), size=sample_size, replace=False)
@@ -123,46 +115,16 @@ def calculate_psnr(clean_img, noisy_img):
     mse = np.mean((clean_img * 255 - noisy_img * 255) ** 2)
     return 20 * np.log10(255.0 / np.sqrt(mse)) if mse != 0 else float('inf')
 
-def add_noise_to_image(img, noise_level=0.1):
-    """Add Gaussian noise to a single image"""
-    noise = np.random.normal(0, noise_level, img.shape)
-    return np.clip(img + noise, 0, 1)
-
 def evaluate_sop3(clean_emb, noisy_emb, clean_labels, threshold):
-    """
-    Corrected SOP3 evaluation with:
-    - Proper accuracy drop calculation
-    - Valid PSNR computation
-    - Robust shift metrics
-    """
-    # 1. Calculate embedding shifts
     shifts = np.linalg.norm(clean_emb - noisy_emb, axis=1)
-    
-    # 2. Compute verification decisions using reference signature
-    ref = np.mean(clean_emb[clean_labels == 0], axis=0)  # Mean genuine embedding
-    
-    # Clean and noisy distances to reference
-    clean_dists = np.linalg.norm(clean_emb - ref, axis=1)
-    noisy_dists = np.linalg.norm(noisy_emb - ref, axis=1)
-    
-    # Predictions (1=genuine, 0=forged)
-    clean_preds = (clean_dists <= threshold).astype(int)
-    noisy_preds = (noisy_dists <= threshold).astype(int)
-    
-    # 3. Calculate actual accuracy drop (should be negative)
-    clean_acc = accuracy_score(clean_labels, clean_preds)
-    noisy_acc = accuracy_score(clean_labels, noisy_preds)
-    acc_drop = clean_acc - noisy_acc
-    
+    dists = np.array([np.min(np.linalg.norm(clean_emb[clean_labels == 0] - e, axis=1)) for e in noisy_emb])
+    preds = (dists > threshold).astype(int)
     return {
+        'SOP3_Mean_PSNR': -1,
+        'SOP3_Accuracy_Drop': accuracy_score(clean_labels, preds),
         'SOP3_Mean_Shift': np.mean(shifts),
-        'SOP3_Max_Shift': np.max(shifts),
-        'SOP3_Clean_Accuracy': clean_acc,
-        'SOP3_Noisy_Accuracy': noisy_acc,
-        'SOP3_Accuracy_Drop': acc_drop,
-        'SOP3_Threshold_Used': threshold
+        'SOP3_Max_Shift': np.max(shifts)
     }
-
 
 # ========== CONFIG ==========
 IMG_SHAPE = (155, 220, 3)
@@ -176,22 +138,22 @@ datasets = {
         "train_writers": list(range(260, 300)),
         "test_writers": list(range(300, 315))
     },
-    # "BHSig260_Bengali": {
-    #     "path": "Dataset/BHSig260_Bengali",
-    #     "train_writers": list(range(1, 71)),
-    #     "test_writers": list(range(71, 101))
-    # },
-    # "BHSig260_Hindi": {
-    #     "path": "Dataset/BHSig260_Hindi",
-    #     "train_writers": list(range(101, 191)),
-    #     "test_writers": list(range(191, 260))
-    # }
+    "BHSig260_Bengali": {
+        "path": "Dataset/BHSig260_Bengali",
+        "train_writers": list(range(1, 71)),
+        "test_writers": list(range(71, 101))
+    },
+    "BHSig260_Hindi": {
+        "path": "Dataset/BHSig260_Hindi",
+        "train_writers": list(range(101, 191)),
+        "test_writers": list(range(191, 260))
+    }
 }
 
 results = []
 
 for dataset_name, config in datasets.items():
-    print(f"\n📦 Processing Base Model for Dataset {dataset_name}")
+    print(f"\n📦 Processing {dataset_name}")
 
     # Data loading
     generator = SignatureDataGenerator(
@@ -217,117 +179,62 @@ for dataset_name, config in datasets.items():
     model.compile(optimizer=RMSprop(0.0001), loss=get_contrastive_loss(MARGIN))
 
     early_stopping = EarlyStopping(
-        monitor='val_loss',
-        patience=10, #gives out around 50% accuracy
-        restore_best_weights=True,
-        verbose=1
+    monitor='val_loss',
+    patience=5,                # You can adjust this (e.g., 3–10 depending on your needs)
+    restore_best_weights=True,
+    verbose=1
     )
 
-    metrics_dir = 'baseline_metrics'
-    os.makedirs(metrics_dir, exist_ok=True)
-
     # ========== Training ==========
-    start_time = time.time()
     history = model.fit(
         [train_pairs[:, 0], train_pairs[:, 1]], train_labels,
         validation_data=([val_pairs[:, 0], val_pairs[:, 1]], val_labels),
-        batch_size=BATCH_SIZE,
+        batch_size=BATCH_SIZE, 
         epochs=EPOCHS,
         callbacks=[early_stopping]
     )
-    train_time = time.time() - start_time
 
-    # ========== Save Weights ==========
-    weights_dir = 'base_weights'
-    os.makedirs(weights_dir, exist_ok=True)
-
-    # Save weights
-    model.save_weights(os.path.join(weights_dir, f"{dataset_name}_siamese_model.weights.h5"))
-    signet_network = base_network
-    signet_network.save_weights(os.path.join(weights_dir, f"{dataset_name}_signet_network.weights.h5"))
-    print(f"✅ Saved weights for {dataset_name}")
-    # After model.save_weights(...)
-    model.save(f"{dataset_name}_triplet_model.h5")
-    print(f"✅ Full model saved as {dataset_name}_triplet_model.h5")
-
-    # ========== Evaluation ==========
-    # 1. Get test data
+    # ========== Embedding Extraction ==========
     test_images, test_labels = generator.get_unbatched_data()
-    clean_imgs, clean_labels = test_images, test_labels  # Store clean versions for SOP3
-    noisy_imgs, _ = generator.get_unbatched_data(noisy=True)
-    noisy_imgs = np.array(noisy_imgs)
-    print(f"✅ Noisy images shape: {noisy_imgs.shape}")
-    if noisy_imgs.ndim != 4:
-        raise ValueError("❌ Noisy images must be a 4D tensor: (batch, height, width, channels)")
-
-    # 2. Extract embeddings
     embeddings = base_network.predict(test_images, verbose=0)
-    clean_emb = embeddings  # Store clean embeddings for SOP3
-    noisy_emb = base_network.predict(noisy_imgs, verbose=0)
 
     # ========== SOP 1 Evaluation ==========
     genuine_d, forged_d, distances, binary_labels = [], [], [], []
-
-    for i in range(len(embeddings)):
-        for j in range(i + 1, len(embeddings)):
-            dist = np.linalg.norm(embeddings[i] - embeddings[j])
-            label_i = test_labels[i]
-            label_j = test_labels[j]
-
-            if label_i == 0 and label_j == 0:
-                genuine_d.append(dist)
-            elif (label_i == 0 and label_j == 1) or (label_i == 1 and label_j == 0):
-                forged_d.append(dist)
-
-    # Use forged + genuine distances to calculate SOP1 metrics
-    distances = genuine_d + forged_d
-    binary_labels = [1] * len(genuine_d) + [0] * len(forged_d)
-    
-    # Diagnostic output
-    print("\n=== Embedding Diagnostics ===")
-    print(f"Genuine distances - Min: {np.min(genuine_d):.4f}, Max: {np.max(genuine_d):.4f}")
-    print(f"Forged distances - Min: {np.min(forged_d):.4f}, Max: {np.max(forged_d):.4f}")
-
-    # Visualization
-    plt.figure(figsize=(12, 4))
-    plt.subplot(131)
-    sns.kdeplot(genuine_d, label='Genuine')
-    sns.kdeplot(forged_d, label='Forged')
-    plt.title("Distance Distributions")
-    plt.legend()
-
+    for i, emb in enumerate(embeddings):
+        dists = [np.linalg.norm(emb - embeddings[j]) for j in range(len(embeddings)) if i != j]
+        min_dist = min(dists)
+        distances.append(min_dist)
+        binary_labels.append(int(test_labels[i]))
+        if test_labels[i] == 0:
+            genuine_d.append(min_dist)
+        else:
+            forged_d.append(min_dist)
     sop1_metrics = evaluate_sop1(genuine_d, forged_d, binary_labels, distances)
-    plt.axvline(sop1_metrics['SOP1_Threshold'], color='r', linestyle='--')
 
     # ========== SOP 2 Evaluation ==========
-    sop2_metrics = evaluate_sop2(embeddings, test_labels)
+    start_time = time.time()
+    _ = [np.min(np.linalg.norm(embeddings - e, axis=1)) for e in embeddings[:100]]
+    query_time = (time.time() - start_time) / 100
+    sop2_metrics = evaluate_sop2(embeddings, test_labels, query_time)
 
     # ========== SOP 3 Evaluation ==========
     try:
-        # Calculate PSNR
-        psnr_values = [calculate_psnr(c, n) for c, n in zip(clean_imgs, noisy_imgs)]
-        
-        # Evaluate with all required parameters
-        sop3_metrics = evaluate_sop3(
-            clean_emb=clean_emb,
-            noisy_emb=noisy_emb,
-            clean_labels=clean_labels,
-            threshold=sop1_metrics['SOP1_Threshold']
-        )
-        # Then calculate PSNR separately
-        psnr_values = [calculate_psnr(c, n) for c, n in zip(clean_imgs, noisy_imgs)]
-        sop3_metrics['SOP3_Mean_PSNR'] = np.mean(psnr_values)
+        clean_imgs, _ = generator.get_unbatched_data()
+        noisy_imgs, _ = generator.get_unbatched_data(noisy=True)
+        noisy_emb = base_network.predict(noisy_imgs, verbose=0)
+        psnrs = [calculate_psnr(clean, noisy) for clean, noisy in zip(clean_imgs, noisy_imgs)]
+        sop3_metrics = evaluate_sop3(embeddings, noisy_emb, test_labels, sop1_metrics['SOP1_Threshold'])
+        sop3_metrics['SOP3_Mean_PSNR'] = np.mean(psnrs) if len(psnrs) > 0 else -1
     except Exception as e:
         print(f"⚠️ SOP 3 failed: {e}")
         sop3_metrics = {k: -1 for k in ['SOP3_Mean_PSNR', 'SOP3_Accuracy_Drop', 'SOP3_Mean_Shift', 'SOP3_Max_Shift']}
 
-    # ========== Collect and Save Results ==========
+    # ========== Collect Results ==========
     acc = accuracy_score(binary_labels, [1 if d > sop1_metrics['SOP1_Threshold'] else 0 for d in distances])
     f1 = f1_score(binary_labels, [1 if d > sop1_metrics['SOP1_Threshold'] else 0 for d in distances])
 
     results.append({
         "Dataset": dataset_name,
-        "Training_Time": train_time,
         **sop1_metrics,
         **sop2_metrics,
         **sop3_metrics,
@@ -335,8 +242,9 @@ for dataset_name, config in datasets.items():
         "F1_Score": f1
     })
 
+    # ✅ Save CSV immediately after each dataset completes:
     pd.DataFrame(results).to_csv("SigNet_Baseline_SOP_Results.csv", index=False)
-    print(f"✅ Metrics saved for {dataset_name}")
+    print(f"✅ Metrics saved to CSV after processing {dataset_name}.")
 
     # ========== Visualization ==========
     plt.figure(figsize=(15, 5))

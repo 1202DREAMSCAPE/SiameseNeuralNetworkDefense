@@ -54,6 +54,7 @@ EMBEDDING_SIZE = 128
 
 
 # --- SOP METRIC FUNCTIONS ---
+# KDE / distance embedding
 
 def evaluate_sop1(genuine_d, forged_d, binary_labels, distances):
     metrics = {
@@ -73,6 +74,18 @@ def evaluate_sop1(genuine_d, forged_d, binary_labels, distances):
         'SOP1_AUC_ROC': roc_auc_score(binary_labels, -np.array(distances)),
         'SOP1_Threshold': thresholds[np.argmax(tpr - fpr)]
     })
+    # 🔽 ADD THIS BLOCK BELOW
+    try:
+        genuine_kde = gaussian_kde(genuine_d)
+        forged_kde = gaussian_kde(forged_d)
+        x = np.linspace(min(min(genuine_d), min(forged_d)),
+                        max(max(genuine_d), max(forged_d)), 1000)
+        diff = genuine_kde(x) - forged_kde(x)
+        f_interp = interp1d(x, diff)
+        kde_threshold = brentq(f_interp, x[0], x[-1])
+        metrics['SOP1_KDE_Threshold'] = kde_threshold
+    except Exception:
+        metrics['SOP1_KDE_Threshold'] = np.nan
     hist_gen, bins = np.histogram(genuine_d, bins=30, density=True)
     hist_forg, _ = np.histogram(forged_d, bins=bins, density=True)
     metrics['SOP1_Overlap_Area'] = np.sum(np.minimum(hist_gen, hist_forg)) * (bins[1] - bins[0])
@@ -124,16 +137,16 @@ datasets = {
         "train_writers": list(range(260, 300)),
         "test_writers": list(range(300, 315))
     },
-    "BHSig260_Bengali": {
-        "path": "Dataset/BHSig260_Bengali",
-        "train_writers": list(range(1, 71)),
-        "test_writers": list(range(71, 101))
-    },
-    "BHSig260_Hindi": {
-        "path": "Dataset/BHSig260_Hindi",
-        "train_writers": list(range(101, 191)), 
-        "test_writers": list(range(191, 260))   
-    },
+    # "BHSig260_Bengali": {
+    #     "path": "Dataset/BHSig260_Bengali",
+    #     "train_writers": list(range(1, 71)),
+    #     "test_writers": list(range(71, 101))
+    # },
+    # "BHSig260_Hindi": {
+    #     "path": "Dataset/BHSig260_Hindi",
+    #     "train_writers": list(range(101, 191)), 
+    #     "test_writers": list(range(191, 260))   
+    # },
 }
 
 # Initialize an empty dictionary to store embeddings for each dataset
@@ -298,9 +311,13 @@ for dataset_name, dataset_config in datasets.items():
         # ✅ Save only the weights (not the full model) to avoid deserialization errors
         triplet_model.save_weights(f"{dataset_name}_triplet_model.weights.h5")
         base_network.save_weights(f"{dataset_name}_base_network.weights.h5")
-
         print(f"✅ Saved triplet model weights: {dataset_name}_triplet_model.weights.h5")
         print(f"✅ Saved base network weights: {dataset_name}_base_network.weights.h5")
+
+        # After model.save_weights(...)
+        triplet_model.save(f"{dataset_name}_triplet_model.h5")
+        base_network.save(f"{dataset_name}_base.h5")
+        print(f"✅ Full model saved as {dataset_name}_triplet_model.h5")
 
     except Exception as e:
         print(f"❌ Error during training with HNM on {dataset_name}: {e}")
@@ -437,6 +454,10 @@ for dataset_name, dataset_config in datasets.items():
     # Kernel Density for Optimal Threshold
     genuine_dists = [d for d, l in zip(distances, binary_labels) if l == 1]
     forged_dists = [d for d, l in zip(distances, binary_labels) if l == 0]
+    # === Embedding Diagnostics ===
+    print("\n=== Embedding Diagnostics ===")
+    print(f"Genuine distances - Min: {np.min(genuine_dists):.4f}, Max: {np.max(genuine_dists):.4f}")
+    print(f"Forged distances - Min: {np.min(forged_dists):.4f}, Max: {np.max(forged_dists):.4f}")
 
     genuine_kde = gaussian_kde(genuine_dists)
     forged_kde = gaussian_kde(forged_dists)
@@ -445,7 +466,7 @@ for dataset_name, dataset_config in datasets.items():
     forged_density = forged_kde(x_range)
 
     intersection_idx = np.argwhere(np.diff(np.sign(genuine_density - forged_density))).flatten()
-    threshold = x_range[intersection_idx][0] if len(intersection_idx) > 0 else np.percentile(genuine_dists, 90)
+    threshold = sop1['SOP1_Threshold']
     print(f"🔑 Optimal Threshold: {threshold:.4f}")
 
     # Second loop to predict
@@ -481,11 +502,6 @@ for dataset_name, dataset_config in datasets.items():
         for key, value in enhanced_sop.items():
             f.write(f"{key}: {value:.4f}\n")
     print(f"✅ SOP metrics appended to {eval_path}")
-
-
-    # ============================
-    # 🔎 Real-World Evaluation – Both Methods
-    # ============================
 
     # Ensure reference embeddings are a normalized matrix
     reference_array = np.array(reference_embeddings)
@@ -636,11 +652,6 @@ for dataset_name, dataset_config in datasets.items():
 
     print(f"✅ CSV file saved: {csv_path}")
 
-
-    # ============================
-    # 📏 Threshold-Based Classification
-    # ============================
-
     # Get only genuine distances
     genuine_distances = [d for d, l in zip(distances, binary_labels) if l == 1]
 
@@ -667,6 +678,54 @@ for dataset_name, dataset_config in datasets.items():
     silhouette_score_path = f"{dataset_name}_silhouette_score.txt"
     with open(silhouette_score_path, "w") as f:
         f.write(f"Silhouette Score: {silhouette_avg:.4f}\n")
+
+    from sklearn.decomposition import PCA
+
+    try:
+        fig, axs = plt.subplots(1, 3, figsize=(18, 5))
+
+        # --- PCA Plot ---
+        pca = PCA(n_components=2)
+        proj = pca.fit_transform(np.array(query_embeddings))
+        scatter = axs[0].scatter(proj[:, 0], proj[:, 1], c=binary_labels, cmap='coolwarm', alpha=0.6)
+        axs[0].set_title("Embedding Space (PCA)")
+        axs[0].set_xlabel("PCA 1")
+        axs[0].set_ylabel("PCA 2")
+        axs[0].grid(True)
+
+        # --- Shift Histogram ---
+        if 'clean_emb' in locals() and 'noisy_emb' in locals():
+            shifts = np.linalg.norm(clean_emb - noisy_emb, axis=1)
+            axs[1].hist(shifts, bins=30, color='teal', alpha=0.7)
+            axs[1].set_title("Noise-Induced Embedding Shifts")
+            axs[1].set_xlabel("L2 Distance Shift")
+            axs[1].set_ylabel("Frequency")
+            axs[1].grid(True)
+        else:
+            axs[1].text(0.5, 0.5, "Noisy data unavailable", ha='center', va='center')
+            axs[1].set_title("Noise-Induced Embedding Shifts")
+
+        # --- Distance Distribution ---
+        genuine_dists = [d for d, l in zip(distances, binary_labels) if l == 1]
+        forged_dists = [d for d, l in zip(distances, binary_labels) if l == 0]
+        axs[2].hist(genuine_dists, bins=30, alpha=0.6, label='Genuine', color='green')
+        axs[2].hist(forged_dists, bins=30, alpha=0.6, label='Forged', color='red')
+        axs[2].axvline(threshold, color='blue', linestyle='--', label=f'Threshold = {threshold:.4f}')
+        axs[2].set_title("Distance Distribution")
+        axs[2].set_xlabel("L2 Distance")
+        axs[2].set_ylabel("Frequency")
+        axs[2].legend()
+        axs[2].grid(True)
+
+        plt.tight_layout()
+        combined_path = f"{dataset_name}_combined_visualization.png"
+        plt.savefig(combined_path)
+        plt.close()
+        print(f"📌 Saved combined visualization: {combined_path}")
+
+    except Exception as e:
+        print(f"⚠️ Combined visualization failed: {e}")
+
 
     # ============================
     # ⏱ FAISS vs Brute-force Timing Comparison
@@ -817,3 +876,4 @@ for dataset_name, dataset_config in datasets.items():
             f.write(f"Hard Negative Ratio: {hn_ratio:.4f}\n")
             f.write(f"Hard Negative Precision: {hn_precision:.4f}\n")
             f.write(f"Hard Negative Recall: {hn_recall:.4f}\n")
+
