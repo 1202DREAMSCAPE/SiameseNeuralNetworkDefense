@@ -248,8 +248,8 @@ for dataset_name, dataset_config in datasets.items():
          .batch(generator.batch_sz, drop_remainder=True) \
          .prefetch(tf.data.AUTOTUNE)
 
-        steps_per_epoch = max(1, len(anchor_imgs) // generator.batch_sz)
-        print(f"🟢 Steps Per Epoch: {steps_per_epoch}, Batch Size: {generator.batch_sz}")
+        #steps_per_epoch = max(1, len(anchor_imgs) // generator.batch_sz)
+        #print(f"🟢 Steps Per Epoch: {steps_per_epoch}, Batch Size: {generator.batch_sz}")
 
         margin = 1.0  
         triplet_model = create_triplet_network((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
