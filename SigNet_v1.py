@@ -16,11 +16,11 @@ def euclidean_distance(vectors):
     Computes the Euclidean distance between two feature vectors.
     """
     x, y = vectors
-    return K.sqrt(K.maximum(K.sum(K.square(x - y), axis=1, keepdims=True), K.epsilon()))
+    return tf.sqrt(tf.maximum(tf.sum(tf.square(x - y), axis=1, keepdims=True), tf.epsilon()))
 
 
 # ✅ Define Batch-Hard Triplet Loss
-def get_triplet_loss(margin=0.5):
+def get_triplet_loss(margin=1.00):
     def loss_fn(y_true, y_pred):
         y_pred = tf.reshape(y_pred, [-1, 3, 128])
         y_pred = tf.math.l2_normalize(y_pred, axis=-1)
