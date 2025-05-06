@@ -5,9 +5,13 @@ import random
 from tensorflow.keras import layers, Model, Input, Sequential
 from tensorflow.keras.utils import register_keras_serializable
 from tensorflow.keras.optimizers import RMSprop
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 from sklearn.metrics import (
     accuracy_score, f1_score, roc_auc_score, roc_curve, confusion_matrix, silhouette_score
+)
+from utils import (
+    visualize_pairs,
+    plot_distance_distributions
 )
 from scipy.optimize import brentq
 from scipy.interpolate import interp1d
@@ -18,6 +22,7 @@ import cv2
 import seaborn as sns
 from SignatureDataGenerator import SignatureDataGenerator
 import numpy as np
+
 
 np.random.seed(1337)
 random.seed(1337)
@@ -75,37 +80,70 @@ def create_base_network_signet(input_shape):
     ])
     return model
 
-def evaluate_sop1(genuine_d, forged_d, binary_labels, distances):
+def compute_accuracy_roc(predictions, labels):
+    """
+    Compute ROC-based accuracy with the best threshold.
+    Returns:
+        max_acc: Best accuracy found
+        best_threshold: Distance threshold yielding best ROC-based accuracy
+    """
+    dmax = np.max(predictions)
+    dmin = np.min(predictions)
+    nsame = np.sum(labels == 1)
+    ndiff = np.sum(labels == 0)
+   
+    step = 0.01
+    max_acc = 0
+    best_threshold = 0.0
+
+    for d in np.arange(dmin, dmax + step, step):
+        idx1 = predictions.ravel() <= d
+        idx2 = predictions.ravel() > d
+       
+        tpr = float(np.sum(labels[idx1] == 1)) / nsame if nsame > 0 else 0
+        tnr = float(np.sum(labels[idx2] == 0)) / ndiff if ndiff > 0 else 0
+        acc = 0.5 * (tpr + tnr)
+       
+        if acc > max_acc:
+            max_acc = acc
+            best_threshold = d
+
+    return max_acc, best_threshold
+
+
+def evaluate_sop1(genuine_d, forged_d, binary_labels, distances, threshold):
     metrics = {
         'SOP1_Mean_Genuine': np.mean(genuine_d),
         'SOP1_Mean_Forged': np.mean(forged_d),
         'SOP1_Std_Genuine': np.std(genuine_d),
-        'SOP1_Std_Forged': np.std(forged_d)
+        'SOP1_Std_Forged': np.std(forged_d),
+        'SOP1_Threshold': threshold
     }
-    fpr, tpr, thresholds = roc_curve(binary_labels, distances)
+
+    # ROC AUC and EER
     try:
+        fpr, tpr, thresholds = roc_curve(binary_labels, distances)
         eer_func = interp1d(fpr, tpr)
         eer = brentq(lambda x: 1. - x - eer_func(x), 0., 1.)
+        metrics['SOP1_EER'] = eer
+        metrics['SOP1_AUC_ROC'] = roc_auc_score(binary_labels, -np.array(distances))  # Inverted for "genuine < forged"
     except Exception:
-        eer = -1
-    
-    metrics.update({
-        'SOP1_EER': eer,
-        'SOP1_AUC_ROC': roc_auc_score(binary_labels, -np.array(distances)),
-        'SOP1_Threshold': thresholds[np.argmax(tpr - fpr)]
-    })
-    hist_gen, bins = np.histogram(genuine_d, bins=30, density=True)
-    hist_forg, _ = np.histogram(forged_d, bins=bins, density=True)
-    metrics['SOP1_Overlap_Area'] = np.sum(np.minimum(hist_gen, hist_forg)) * (bins[1] - bins[0])
-    preds = [1 if d > metrics['SOP1_Threshold'] else 0 for d in distances]
+        metrics['SOP1_EER'] = -1
+        metrics['SOP1_AUC_ROC'] = -1
+
+    # Apply externally computed threshold
+    preds = [1 if d <= threshold else 0 for d in distances]
     cm = confusion_matrix(binary_labels, preds)
+
     if cm.shape == (2, 2):
         TN, FP, FN, TP = cm.ravel()
-        metrics['SOP1_FAR'] = FP / (FP + TN) if (FP + TN) != 0 else np.nan
-        metrics['SOP1_FRR'] = FN / (FN + TP) if (FN + TP) != 0 else np.nan
+        metrics['SOP1_FAR'] = FP / (FP + TN) if (FP + TN) > 0 else np.nan
+        metrics['SOP1_FRR'] = FN / (FN + TP) if (FN + TP) > 0 else np.nan
     else:
         metrics['SOP1_FAR'], metrics['SOP1_FRR'] = np.nan, np.nan
+
     return metrics
+
 
 def evaluate_sop2(embeddings, labels):
     metrics = {}
@@ -168,7 +206,7 @@ def evaluate_sop3(clean_emb, noisy_emb, clean_labels, threshold):
 # ========== CONFIG ==========
 IMG_SHAPE = (155, 220, 3)
 BATCH_SIZE = 32
-EPOCHS = 40
+EPOCHS = 20
 MARGIN = 1.0
 
 datasets = {
@@ -177,16 +215,16 @@ datasets = {
         "train_writers": list(range(260, 300)),
         "test_writers": list(range(300, 315))
     },
-    # "BHSig260_Bengali": {
-    #     "path": "Dataset/BHSig260_Bengali",
-    #     "train_writers": list(range(1, 71)),
-    #     "test_writers": list(range(71, 101))
-    # },
-    # "BHSig260_Hindi": {
-    #     "path": "Dataset/BHSig260_Hindi",
-    #     "train_writers": list(range(101, 191)),
-    #     "test_writers": list(range(191, 260))
-    # }
+     "BHSig260_Bengali": {
+         "path": "Dataset/BHSig260_Bengali",
+         "train_writers": list(range(1, 71)),
+         "test_writers": list(range(71, 101))
+     },
+     "BHSig260_Hindi": {
+         "path": "Dataset/BHSig260_Hindi",
+         "train_writers": list(range(101, 191)),
+         "test_writers": list(range(191, 260))
+     }
 }
 
 results = []
@@ -202,8 +240,8 @@ for dataset_name, config in datasets.items():
         batch_sz=BATCH_SIZE,
     )
     pairs, labels = generator.generate_pairs()
-    pairs, labels = np.array(pairs), np.array(labels).astype(np.float32)
-
+    labels = np.array(labels).astype(np.float32)
+    print(f"✅ Loaded {len(pairs)} pairs with labels.")
     # Train/val split
     val_split = int(0.9 * len(pairs))
     train_pairs, val_pairs = pairs[:val_split], pairs[val_split:]
@@ -219,37 +257,46 @@ for dataset_name, config in datasets.items():
 
     early_stopping = EarlyStopping(
         monitor='val_loss',
-        patience=10, #gives out around 50% accuracy
+        patience=5, #gives out around 50% accuracy
         restore_best_weights=True,
         verbose=1
     )
-
+    
+    weights_dir = 'base_weights'
     metrics_dir = 'baseline_metrics'
     os.makedirs(metrics_dir, exist_ok=True)
+    # Split train pairs
+    train_img1 = [pair[0] for pair in train_pairs]
+    train_img2 = [pair[1] for pair in train_pairs]
+
+    # Split validation pairs
+    val_img1 = [pair[0] for pair in val_pairs]
+    val_img2 = [pair[1] for pair in val_pairs]
 
     # ========== Training ==========
     start_time = time.time()
     history = model.fit(
-        [train_pairs[:, 0], train_pairs[:, 1]], train_labels,
-        validation_data=([val_pairs[:, 0], val_pairs[:, 1]], val_labels),
+        [np.array(train_img1), np.array(train_img2)], np.array(train_labels),
+        validation_data=([np.array(val_img1), np.array(val_img2)], np.array(val_labels)),
         batch_size=BATCH_SIZE,
         epochs=EPOCHS,
-        callbacks=[early_stopping]
+        callbacks=[early_stopping],
     )
     train_time = time.time() - start_time
-
     # ========== Save Weights ==========
-    weights_dir = 'base_weights'
     os.makedirs(weights_dir, exist_ok=True)
+    # Optional but recommended: Load best weights from disk
 
-    # Save weights
+    # Save final model weights (Siamese full model)
     model.save_weights(os.path.join(weights_dir, f"{dataset_name}_siamese_model.weights.h5"))
-    signet_network = base_network
-    signet_network.save_weights(os.path.join(weights_dir, f"{dataset_name}_signet_network.weights.h5"))
-    print(f"✅ Saved weights for {dataset_name}")
-    # After model.save_weights(...)
-    model.save(f"{dataset_name}_triplet_model.h5")
-    print(f"✅ Full model saved as {dataset_name}_triplet_model.h5")
+
+    # Save only the base feature extractor (SigNet)
+    base_network.save_weights(os.path.join(weights_dir, f"{dataset_name}_signet_network.weights.h5"))
+
+    # Save entire model (architecture + weights)
+    model.save(f"{dataset_name}_model.h5")
+
+    print(f"✅ Saved all weights and model for {dataset_name}")
 
     # ========== Evaluation ==========
     # 1. Get test data
@@ -280,10 +327,13 @@ for dataset_name, config in datasets.items():
             elif (label_i == 0 and label_j == 1) or (label_i == 1 and label_j == 0):
                 forged_d.append(dist)
 
-    # Use forged + genuine distances to calculate SOP1 metrics
+    # Combine distances and labels
     distances = genuine_d + forged_d
     binary_labels = [1] * len(genuine_d) + [0] * len(forged_d)
-    
+
+    # Compute ROC-based accuracy and best threshold
+    acc, best_threshold = compute_accuracy_roc(np.array(distances), np.array(binary_labels))
+
     # Diagnostic output
     print("\n=== Embedding Diagnostics ===")
     print(f"Genuine distances - Min: {np.min(genuine_d):.4f}, Max: {np.max(genuine_d):.4f}")
@@ -291,14 +341,22 @@ for dataset_name, config in datasets.items():
 
     # Visualization
     plt.figure(figsize=(12, 4))
-    plt.subplot(131)
-    sns.kdeplot(genuine_d, label='Genuine')
-    sns.kdeplot(forged_d, label='Forged')
-    plt.title("Distance Distributions")
+    sns.kdeplot(genuine_d, label='Genuine', fill=True)
+    sns.kdeplot(forged_d, label='Forged', fill=True)
+    plt.axvline(x=best_threshold, color='r', linestyle='--', label='Best Threshold')
+    plt.title("Distance Distributions with Optimal Threshold")
     plt.legend()
+    plt.tight_layout()
+    plt.show()
 
-    sop1_metrics = evaluate_sop1(genuine_d, forged_d, binary_labels, distances)
-    plt.axvline(sop1_metrics['SOP1_Threshold'], color='r', linestyle='--')
+    # Metric evaluation
+    sop1_metrics = evaluate_sop1(
+    genuine_d=genuine_d,
+    forged_d=forged_d,
+    binary_labels=binary_labels,
+    distances=distances,
+    threshold=best_threshold
+)
 
     # ========== SOP 2 Evaluation ==========
     sop2_metrics = evaluate_sop2(embeddings, test_labels)
@@ -307,13 +365,13 @@ for dataset_name, config in datasets.items():
     try:
         # Calculate PSNR
         psnr_values = [calculate_psnr(c, n) for c, n in zip(clean_imgs, noisy_imgs)]
-        
+
         # Evaluate with all required parameters
         sop3_metrics = evaluate_sop3(
             clean_emb=clean_emb,
             noisy_emb=noisy_emb,
             clean_labels=clean_labels,
-            threshold=sop1_metrics['SOP1_Threshold']
+            threshold=best_threshold
         )
         # Then calculate PSNR separately
         psnr_values = [calculate_psnr(c, n) for c, n in zip(clean_imgs, noisy_imgs)]
@@ -323,8 +381,7 @@ for dataset_name, config in datasets.items():
         sop3_metrics = {k: -1 for k in ['SOP3_Mean_PSNR', 'SOP3_Accuracy_Drop', 'SOP3_Mean_Shift', 'SOP3_Max_Shift']}
 
     # ========== Collect and Save Results ==========
-    acc = accuracy_score(binary_labels, [1 if d > sop1_metrics['SOP1_Threshold'] else 0 for d in distances])
-    f1 = f1_score(binary_labels, [1 if d > sop1_metrics['SOP1_Threshold'] else 0 for d in distances])
+    f1 = f1_score(binary_labels, [1 if d > best_threshold else 0 for d in distances])
 
     results.append({
         "Dataset": dataset_name,
@@ -349,6 +406,7 @@ for dataset_name, config in datasets.items():
     plt.legend()
 
     plt.subplot(132)
+
     from sklearn.decomposition import PCA
     pca = PCA(n_components=2).fit_transform(embeddings[:200])
     plt.scatter(pca[:, 0], pca[:, 1], c=test_labels[:200], alpha=0.6)
@@ -375,5 +433,41 @@ for dataset_name, config in datasets.items():
     plt.tight_layout()
     plt.savefig(f"{dataset_name}_baseline_loss_curve.png")
     plt.close()
+
+# ====== Sample Visualization of Test Pairs (Qualitative) ======
+# Sample test pairs for visualization
+sampled_pairs = []
+sampled_labels = []
+
+# Build up to 10 genuine-genuine and 10 genuine-forged pairs from test set
+count_genuine = 0
+count_forged = 0
+
+for i in range(len(test_images)):
+    for j in range(i + 1, len(test_images)):
+        if count_genuine >= 10 and count_forged >= 10:
+            break
+
+        label_i = test_labels[i]
+        label_j = test_labels[j]
+
+        if label_i == 0 and label_j == 0 and count_genuine < 10:
+            sampled_pairs.append((test_images[i], test_images[j]))
+            sampled_labels.append(1)
+            count_genuine += 1
+        elif (label_i == 0 and label_j == 1 or label_i == 1 and label_j == 0) and count_forged < 10:
+            sampled_pairs.append((test_images[i], test_images[j]))
+            sampled_labels.append(0)
+            count_forged += 1
+
+# Call visualization function (saves pair images and PCA)
+visualize_pairs(
+    pairs=sampled_pairs,
+    labels=np.array(sampled_labels),
+    base_network=base_network,
+    output_dir=f"{dataset_name}_pair_visualization"
+)
+
+plot_distance_distributions(pairs, labels, base_network, title="SigNet Evaluation", save_dir="SigNet_Eval")
 
 print(f"📋 Finished evaluation for {dataset_name}. Current CSV updated.\n")
