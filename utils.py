@@ -8,6 +8,13 @@ from sklearn.metrics import (
     accuracy_score, f1_score, roc_auc_score
 )
 from scipy.stats import gaussian_kde
+import random
+import matplotlib.pyplot as plt
+import pandas as pd
+from tensorflow.keras.models import Model
+from sklearn.decomposition import PCA
+
+
 
 def evaluate_threshold(base_model, generator, embedding_size):
     try:
@@ -187,20 +194,159 @@ def compute_hard_negative_metrics(y_true, y_pred, hard_negative_indices):
 
     return hard_negative_ratio, precision, recall
 
-# Evaluation
-def evaluate_with_faiss(base_network, index, test_images, test_labels, threshold):
-    y_true, y_pred = [], []
-    query_embeds = base_network.predict(test_images)
+#Visualize Triplets
+def visualize_triplets(anchor_imgs, positive_imgs, negative_imgs, output_dir="Triplet_Examples"):
+    import matplotlib.pyplot as plt
+    import os
+    os.makedirs(output_dir, exist_ok=True)
 
-    for i, query in enumerate(query_embeds):
-        label = test_labels[i]
-        query_norm = query / np.linalg.norm(query)
-        D, _ = index.search(np.expand_dims(query_norm, axis=0), k=1)
-        distance = D[0][0]
-        prediction = 1 if distance <= threshold else 0
-        y_true.append(label)
-        y_pred.append(prediction)
+    num_samples = min(5, len(anchor_imgs))
+    indices = random.sample(range(len(anchor_imgs)), num_samples)
 
-    acc = accuracy_score(y_true, y_pred)
-    f1 = f1_score(y_true, y_pred)
-    return acc, f1
+    for i, idx in enumerate(indices):
+        anchor = anchor_imgs[idx]
+        positive = positive_imgs[idx]
+        negative = negative_imgs[idx]
+
+        fig, axs = plt.subplots(1, 3, figsize=(10, 3))
+        axs[0].imshow((anchor * 0.5 + 0.5))  # Denormalize from [-1, 1] to [0, 1]
+        axs[0].set_title("Anchor")
+        axs[0].axis('off')
+
+        axs[1].imshow((positive * 0.5 + 0.5))
+        axs[1].set_title("Positive")
+        axs[1].axis('off')
+
+        axs[2].imshow((negative * 0.5 + 0.5))
+        axs[2].set_title("Negative")
+        axs[2].axis('off')
+
+        plt.tight_layout()
+        save_path = os.path.join(output_dir, f"triplet_{i+1}.png")
+        plt.savefig(save_path)
+        plt.close()
+        print(f"🖼 Triplet {i+1} saved to: {save_path}")
+
+#Visaualize Contr4stive loss
+def visualize_pairs(pairs, labels, base_network, output_dir="Contrastive_Pairs"):
+    os.makedirs(output_dir, exist_ok=True)
+    csv_path = os.path.join(output_dir, "contrastive_pairs_log_simple.csv")
+    csv_rows = []
+
+    num_samples = min(5, len(pairs))
+    indices = random.sample(range(len(pairs)), num_samples)
+
+    all_embeddings = []
+    all_labels = []
+
+    for i, idx in enumerate(indices):
+        img1, img2 = pairs[idx]
+        label = labels[idx]
+
+        emb1 = base_network.predict(np.expand_dims(img1, axis=0), verbose=0).flatten()
+        emb2 = base_network.predict(np.expand_dims(img2, axis=0), verbose=0).flatten()
+        distance = np.linalg.norm(emb1 - emb2)
+
+        pair_type = "Genuine-Genuine" if label == 1 else "Genuine-Forged"
+
+        fig, axs = plt.subplots(1, 2, figsize=(8, 4))
+        axs[0].imshow((img1 * 0.5 + 0.5))
+        axs[0].set_title("Image 1", fontsize=8)
+        axs[0].axis('off')
+
+        axs[1].imshow((img2 * 0.5 + 0.5))
+        axs[1].set_title("Image 2", fontsize=8)
+        axs[1].axis('off')
+
+        plt.suptitle(f"Pair {i+1} - {pair_type} | Distance: {distance:.4f}", fontsize=10)
+        plt.tight_layout()
+
+        filename = f"pair_{i+1}_{pair_type.replace('-', '_')}.png"
+        save_path = os.path.join(output_dir, filename)
+        plt.savefig(save_path)
+        plt.close()
+        print(f"🖼 Pair {i+1} saved to: {save_path}")
+
+        csv_rows.append({
+            "Pair Number": i + 1,
+            "Pair Type": pair_type,
+            "True Label": label,
+            "Euclidean Distance": float(distance)
+        })
+
+        # For PCA
+        all_embeddings.append(emb1)
+        all_embeddings.append(emb2)
+        all_labels.append(label)
+        all_labels.append(label)
+
+    # PCA Plot
+    pca = PCA(n_components=2)
+    reduced = pca.fit_transform(all_embeddings)
+
+    reduced = np.array(reduced)
+    all_labels = np.array(all_labels)
+
+    plt.figure(figsize=(6, 5))
+    plt.scatter(reduced[all_labels == 1, 0], reduced[all_labels == 1, 1], c='green', label='Genuine', alpha=0.7)
+    plt.scatter(reduced[all_labels == 0, 0], reduced[all_labels == 0, 1], c='red', label='Forged', alpha=0.7)
+    plt.title("PCA of Sampled Pair Embeddings")
+    plt.xlabel("Principal Component 1")
+    plt.ylabel("Principal Component 2")
+    plt.legend()
+    plt.grid(True)
+    pca_path = os.path.join(output_dir, "pca_pair_embeddings.png")
+    plt.savefig(pca_path)
+    plt.close()
+    print(f"📊 PCA plot saved to: {pca_path}")
+
+    # Save CSV
+    df = pd.DataFrame(csv_rows)
+    df.to_csv(csv_path, index=False)
+    print(f"📄 Pair metadata saved to: {csv_path}")
+
+def plot_distance_distributions(pairs, labels, base_network, title="Distance Distribution", save_dir="base_disembed"):
+    os.makedirs(save_dir, exist_ok=True)
+
+    genuine_dists = []
+    forged_dists = []
+
+    for pair, label in zip(pairs, labels):
+    # Support both: (img1, img2) and ((img1, img2), metadata)
+        if isinstance(pair[0], np.ndarray):
+            img1, img2 = pair
+        else:
+            (img1, img2), _ = pair
+
+        # Ensure proper shape
+        img1 = np.expand_dims(np.array(img1), axis=0).astype(np.float32)
+        img2 = np.expand_dims(np.array(img2), axis=0).astype(np.float32)
+
+        # Get embeddings
+        emb1 = base_network.predict(img1, verbose=0)
+        emb2 = base_network.predict(img2, verbose=0)
+
+        # Euclidean distance
+        dist = np.linalg.norm(emb1 - emb2)
+
+        if label == 1:
+            genuine_dists.append(dist)
+        else:
+            forged_dists.append(dist)
+
+    # Plotting
+    plt.figure(figsize=(8, 5))
+    plt.hist(genuine_dists, bins=30, alpha=0.7, label="Genuine-Genuine (Label=1)")
+    plt.hist(forged_dists, bins=30, alpha=0.7, label="Genuine-Forged (Label=0)")
+    plt.title(title)
+    plt.xlabel("Euclidean Distance")
+    plt.ylabel("Frequency")
+    plt.legend()
+    plt.grid(True)
+
+    # Save plot
+    filename = title.lower().replace(" ", "_") + ".png"
+    save_path = os.path.join(save_dir, filename)
+    plt.savefig(save_path)
+    plt.close()
+    print(f"📊 Saved distance distribution to: {save_path}")

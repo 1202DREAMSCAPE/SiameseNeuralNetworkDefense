@@ -19,12 +19,14 @@ random.seed(1337)
 class SignatureDataGenerator:
     def __init__(self, dataset, img_height=155, img_width=220, batch_sz=8):
         self.dataset = dataset
+        self.dataset_name = list(dataset.keys())[0]
         self.img_height = img_height
         self.img_width = img_width
         self.batch_sz = batch_sz
         self.train_writers = []
         self.test_writers = []
         self._load_writers()
+        
 
     def _load_writers(self):
         """Load writer directories and validate existence."""
@@ -147,7 +149,7 @@ class SignatureDataGenerator:
 
     def log_triplet(self, writer, anchor_path, positive_path, negative_writer, negative_path, negative_label):
         """Log the generated triplet to a CSV file for monitoring."""
-        csv_path = "triplet_monitoring.csv"
+        csv_path = f"triplet_monitoring_{self.dataset_name}.csv"
         triplet_info = {
             "Anchor": f"Writer_{writer}_Genuine_{os.path.basename(anchor_path)}",
             "Positive": f"Writer_{writer}_Genuine_{os.path.basename(positive_path)}",
@@ -396,9 +398,12 @@ class SignatureDataGenerator:
         anchor_list, positive_list, negative_list = [], [], []
 
         all_images = []
+        all_image_paths = []
         all_writer_ids = []
 
         for dataset_path, writer in self.train_writers:
+            if os.path.basename(dataset_path) != self.dataset_name:
+                continue
             for label_type in ['genuine', 'forged']:
                 img_dir = os.path.join(dataset_path, f"writer_{writer:03d}", label_type)
                 if not os.path.exists(img_dir): continue
@@ -407,6 +412,7 @@ class SignatureDataGenerator:
                     img_path = os.path.join(img_dir, img_file)
                     img = self.preprocess_image(img_path)
                     all_images.append(img)
+                    all_image_paths.append(img_path) 
                     all_writer_ids.append(writer)
 
         all_images_np = np.array(all_images)
@@ -441,6 +447,22 @@ class SignatureDataGenerator:
                     anchor_list.append(all_images[anchor_idx])
                     positive_list.append(all_images[positive_idx])
                     negative_list.append(all_images[hardest_neg_idx])
+
+                # 📝 Log the triplet
+                anchor_path = all_image_paths[anchor_idx]
+                positive_path = all_image_paths[positive_idx]
+                negative_path = all_image_paths[hardest_neg_idx]
+                negative_writer = all_writer_ids[hardest_neg_idx]
+
+                # Determine label type by path
+                if "genuine" in negative_path.lower():
+                    neg_label = "Genuine"
+                elif "forged" in negative_path.lower():
+                    neg_label = "Forged"
+                else:
+                    neg_label = "Unknown"
+
+                self.log_triplet(writer, anchor_path, positive_path, negative_writer, negative_path, neg_label)
 
         print(f"✅ Total hard-mined triplets: {len(anchor_list)}")
         return anchor_list, positive_list, negative_list

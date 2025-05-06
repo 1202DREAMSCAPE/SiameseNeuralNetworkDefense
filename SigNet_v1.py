@@ -20,7 +20,7 @@ def euclidean_distance(vectors):
 
 
 # ✅ Define Batch-Hard Triplet Loss
-def get_triplet_loss(margin=1.00):
+def get_triplet_loss(margin=0.3):
     def loss_fn(y_true, y_pred):
         y_pred = tf.reshape(y_pred, [-1, 3, 128])
         y_pred = tf.math.l2_normalize(y_pred, axis=-1)
@@ -35,7 +35,6 @@ def get_triplet_loss(margin=1.00):
     return loss_fn
 
 def generate_hard_mined_triplets(self, base_network, batch_size=32):
-    print("🔍 [Brute-force] Generating hard-mined triplets without FAISS...")
 
     anchor_list, positive_list, negative_list = [], [], []
 
@@ -87,14 +86,27 @@ def generate_hard_mined_triplets(self, base_network, batch_size=32):
                         hardest_neg_idx = j
 
             if hardest_neg_idx is not None:
+                # Create pseudo-filenames for logging
+                anchor_name = f"img_{anchor_idx}.png"
+                positive_name = f"img_{positive_idx}.png"
+                negative_name = f"img_{hardest_neg_idx}.png"
+
+                self.log_triplet(
+                    writer=writer,
+                    anchor_path=anchor_name,
+                    positive_path=positive_name,
+                    negative_writer=all_writer_ids[hardest_neg_idx],
+                    negative_path=negative_name,
+                    negative_label="HardNeg"
+                )
+
                 anchor_list.append(all_images[anchor_idx])
                 positive_list.append(all_images[positive_idx])
                 negative_list.append(all_images[hardest_neg_idx])
 
-    print(f"✅ [Brute-force] Total hard-mined triplets: {len(anchor_list)}")
+
+    print(f"✅ Total hard-mined triplets: {len(anchor_list)}")
     return anchor_list, positive_list, negative_list
-
-
 
 # ✅ Define the SigNet Base Network Architecture with Multi-Scale Feature Learning
 def create_base_network_signet_dilated(input_shape, embedding_dim=128):
@@ -132,11 +144,8 @@ def create_base_network_signet_dilated(input_shape, embedding_dim=128):
     return seq
 
 # ✅ Define the Triplet Network (Updated)
-def create_triplet_network(input_shape, embedding_dim=128):
-    """
-    Builds the Triplet Neural Network with the updated base architecture.
-    """
-    base_network = create_base_network_signet_dilated(input_shape, embedding_dim=embedding_dim)
+def create_triplet_network_from_existing_base(base_network):
+    input_shape = base_network.input_shape[1:]
 
     input_anchor = Input(shape=input_shape, name='input_anchor')
     input_positive = Input(shape=input_shape, name='input_positive')
@@ -146,17 +155,13 @@ def create_triplet_network(input_shape, embedding_dim=128):
     encoded_positive = base_network(input_positive)
     encoded_negative = base_network(input_negative)
 
-    # ✅ Step 1: Apply Lambda with proper output shape
-    stacked = Lambda(
-        lambda x: K.stack(x, axis=1),
-        output_shape=lambda input_shapes: (input_shapes[0][0], 3, input_shapes[0][1]),
-        name="triplet_stack"
-    )([encoded_anchor, encoded_positive, encoded_negative])
+    stacked = Lambda(lambda x: K.stack(x, axis=1), name="triplet_stack")(
+        [encoded_anchor, encoded_positive, encoded_negative]
+    )
 
-    # ✅ Step 2: Create model from inputs to stacked output
     model = Model(inputs=[input_anchor, input_positive, input_negative], outputs=stacked)
-
     return model
+
 
 def get_contrastive_loss(margin=1.0):
     """

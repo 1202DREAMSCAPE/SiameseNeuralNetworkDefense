@@ -168,34 +168,17 @@ datasets = {
         "train_writers": list(range(260, 300)),
         "test_writers": list(range(300, 315))
     },
-     "BHSig260_Bengali": {
-         "path": "Dataset/BHSig260_Bengali",
-         "train_writers": list(range(1, 71)),
-         "test_writers": list(range(71, 101))
-     },
-     "BHSig260_Hindi": {
-         "path": "Dataset/BHSig260_Hindi",
-         "train_writers": list(range(101, 191)), 
-         "test_writers": list(range(191, 260))   
-     },
+    # "BHSig260_Bengali": {
+    #     "path": "Dataset/BHSig260_Bengali",
+    #     "train_writers": list(range(1, 71)),
+    #     "test_writers": list(range(71, 101))
+    # },
+    # "BHSig260_Hindi": {
+    #     "path": "Dataset/BHSig260_Hindi",
+    #     "train_writers": list(range(101, 191)), 
+    #     "test_writers": list(range(191, 260))   
+    # },
 }
-
-# --- Merged Dataset for Training ---
-merged_train_config = {
-    "Merged": {
-        "path": "",  # left blank; handled per writer
-        "train_writers": []
-    }
-}
-
-# Combine all train writers from each dataset
-for dataset_name, config in datasets.items():
-    path = config["path"]
-    for writer in config["train_writers"]:
-        merged_train_config["Merged"]["train_writers"].append({
-            "path": path,
-            "writer": writer
-        })
 
 IMG_SHAPE = (155, 220, 3)
 EMBEDDING_SIZE = 128
@@ -210,7 +193,6 @@ balanced_embeddings = {}
 for dataset_name, dataset_config in datasets.items():
     print(f"\n--- Preprocessing {dataset_name} ---")
     try:
-        dataset_config = datasets[dataset_name]
         generator = SignatureDataGenerator(
             dataset={dataset_name: dataset_config},
             img_height=155,
@@ -218,22 +200,9 @@ for dataset_name, dataset_config in datasets.items():
             batch_sz=BATCH_SIZE,
         )
 
-        # --- Merged SignatureDataGenerator ---
-        # generator = SignatureDataGenerator(
-        #     dataset=merged_train_config,
-        #     img_height=155,
-        #     img_width=220,
-        #     batch_sz=BATCH_SIZE
-        # )
-
-        # # ✅ Set this to label outputs and saved weights
-        # dataset_name = "Merged"
-
-
-        generator.save_dataset_to_csv(f"{dataset_name}_signature_dataset.csv")
         generator.visualize_clahe_effect(output_dir=f"CLAHE_Comparison_{dataset_name}")
 
-        base_network = create_base_network_signet((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
+        base_network = create_base_network_signet(IMG_SHAPE, embedding_dim=EMBEDDING_SIZE)
         all_images, all_labels = generator.get_all_data_with_labels()  # CLAHE is applied here
         embeddings = base_network.predict(all_images)
         print(f"🔎 Class distribution before SMOTE: {Counter(all_labels)}")
@@ -256,18 +225,6 @@ for dataset_name, dataset_config in datasets.items():
 for dataset_name, (embeddings, labels) in balanced_embeddings.items():
     print(f"\n--- Training Triplet Model for {dataset_name} ---")
     try:
-        # 🔁 Ensure we use the correct dataset-specific generator and base network
-        dataset_config = datasets[dataset_name]
-        generator = SignatureDataGenerator(
-            dataset={dataset_name: dataset_config},
-            img_height=155,
-            img_width=220,
-            batch_sz=BATCH_SIZE,
-        )
-
-        base_network = create_base_network_signet((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
-
-        # 🧠 Generate hard-mined triplets using correct data
         anchor_imgs, positive_imgs, negative_imgs = generator.generate_hard_mined_triplets(base_network)
         print(f"✅ Triplets generated: {len(anchor_imgs)}")
 
@@ -280,8 +237,8 @@ for dataset_name, (embeddings, labels) in balanced_embeddings.items():
          .batch(BATCH_SIZE, drop_remainder=True) \
          .prefetch(tf.data.AUTOTUNE)
 
-        # 🧱 Build model using same base
-        base_network = create_base_network_signet((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
+        # Triplet Model
+        base_network = create_base_network_signet(IMG_SHAPE, embedding_dim=EMBEDDING_SIZE)
         triplet_model = create_triplet_network_from_existing_base(base_network)
 
         triplet_model.compile(
@@ -303,13 +260,13 @@ for dataset_name, (embeddings, labels) in balanced_embeddings.items():
             # callbacks=[early_stopping]
         )
 
-        # ✅ Save only weights
+        # ✅ Save only the weights (not the full model) to avoid deserialization errors
         triplet_model.save_weights(f"{dataset_name}_triplet_model.weights.h5")
         base_network.save_weights(f"{dataset_name}_base_network.weights.h5")
         print(f"✅ Saved triplet model weights: {dataset_name}_triplet_model.weights.h5")
         print(f"✅ Saved base network weights: {dataset_name}_base_network.weights.h5")
 
-        # ✅ Optional: Save full model
+        # After model.save_weights(...)
         triplet_model.save(f"{dataset_name}_triplet_model.h5")
         base_network.save(f"{dataset_name}_base.h5")
         print(f"✅ Full model saved as {dataset_name}_triplet_model.h5")
@@ -529,13 +486,13 @@ for dataset_name, dataset_config in datasets.items():
         genuine_dists = [d for d, l in zip(distances, binary_labels) if l == 1]
         forged_dists = [d for d, l in zip(distances, binary_labels) if l == 0]
 
-        # # Create KDE plots for visualization only
-        # genuine_kde = gaussian_kde(genuine_dists)
-        # forged_kde = gaussian_kde(forged_dists)
-        # x = np.linspace(min(min(genuine_dists), min(forged_dists)), 
-        #                 max(max(genuine_dists), max(forged_dists)), 1000)
-        # genuine_density = genuine_kde(x)
-        # forged_density = forged_kde(x)
+        # Create KDE plots for visualization only
+        genuine_kde = gaussian_kde(genuine_dists)
+        forged_kde = gaussian_kde(forged_dists)
+        x = np.linspace(min(min(genuine_dists), min(forged_dists)), 
+                        max(max(genuine_dists), max(forged_dists)), 1000)
+        genuine_density = genuine_kde(x)
+        forged_density = forged_kde(x)
 
         # Use SOP1 threshold for all evaluations
         threshold = best_threshold
@@ -660,6 +617,23 @@ for dataset_name, dataset_config in datasets.items():
         plt.legend()
         plt.tight_layout()
         plt.savefig(f"{dataset_name}_precision_recall_curve.png")
+
+        f1s = []
+        thresholds_to_check = np.linspace(min(distances), max(distances), 100)
+        for t in thresholds_to_check:
+            preds = [1 if d < t else 0 for d in distances]
+            f1s.append(f1_score(binary_labels, preds))
+
+        plt.figure(figsize=(7, 5))
+        plt.plot(thresholds_to_check, f1s, label="F1 vs Threshold", color='orange')
+        plt.axvline(threshold, color='blue', linestyle='--', label=f"Chosen Threshold: {threshold:.4f}")
+        plt.title("F1 Score vs Threshold")
+        plt.xlabel("Distance Threshold")
+        plt.ylabel("F1 Score")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{dataset_name}_f1_vs_threshold.png")
 
         plt.figure(figsize=(10, 5))
         plt.hist(genuine_dists, bins=30, alpha=0.6, label='Genuine Distances', color='green')
