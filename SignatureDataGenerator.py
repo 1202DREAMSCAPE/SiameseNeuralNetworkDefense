@@ -147,6 +147,25 @@ class SignatureDataGenerator:
 
         return np.array(images), np.array(labels)
 
+    def get_all_data_with_writer_ids(self):
+        """
+        Return CLAHE‑preprocessed images + WRITER‑ID labels
+        (label = writer id, not 0/1).
+        """
+        images, writer_ids = [], []
+        for dataset_path, writer in self.train_writers:
+            for label_type in ["genuine", "forged"]:
+                img_dir = os.path.join(dataset_path, f"writer_{writer:03d}", label_type)
+                if not os.path.exists(img_dir):
+                    continue
+                for fn in os.listdir(img_dir):
+                    img_path = os.path.join(img_dir, fn)
+                    images.append(self.preprocess_image(img_path))
+                    writer_ids.append(writer)
+        return np.array(images), np.array(writer_ids)
+
+
+
     def log_triplet(self, writer, anchor_path, positive_path, negative_writer, negative_path, negative_label):
         """Log the generated triplet to a CSV file for monitoring."""
         csv_path = f"triplet_monitoring_{self.dataset_name}.csv"

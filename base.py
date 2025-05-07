@@ -207,7 +207,7 @@ def evaluate_sop3(clean_emb, noisy_emb, clean_labels, threshold):
 IMG_SHAPE = (155, 220, 3)
 BATCH_SIZE = 32
 EPOCHS = 20
-MARGIN = 1.0
+MARGIN = 0.7
 
 datasets = {
     "CEDAR": {
@@ -255,12 +255,12 @@ for dataset_name, config in datasets.items():
     model = Model([input_a, input_b], distance)
     model.compile(optimizer=RMSprop(0.0001), loss=get_contrastive_loss(MARGIN))
 
-    early_stopping = EarlyStopping(
-        monitor='val_loss',
-        patience=5, #gives out around 50% accuracy
-        restore_best_weights=True,
-        verbose=1
-    )
+    # early_stopping = EarlyStopping(
+    #     monitor='val_loss',
+    #     patience=5, #gives out around 50% accuracy
+    #     restore_best_weights=True,
+    #     verbose=1
+    # )
     
     weights_dir = 'base_weights'
     metrics_dir = 'baseline_metrics'
@@ -280,7 +280,7 @@ for dataset_name, config in datasets.items():
         validation_data=([np.array(val_img1), np.array(val_img2)], np.array(val_labels)),
         batch_size=BATCH_SIZE,
         epochs=EPOCHS,
-        callbacks=[early_stopping],
+       # callbacks=[early_stopping],
     )
     train_time = time.time() - start_time
     # ========== Save Weights ==========
