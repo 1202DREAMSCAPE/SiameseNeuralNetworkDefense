@@ -138,6 +138,8 @@ BATCH_SIZE = 32
 EPOCHS = 20
 MARGIN = 0.7
 
+# too many values to unpack (expected 2)
+
 # --- Storage ---
 balanced_embeddings = {}
 
@@ -152,6 +154,7 @@ for dataset_name, dataset_config in datasets.items():
             img_width=220,
             batch_sz=BATCH_SIZE,
         )
+        
 
         # --- Merged SignatureDataGenerator ---
         # generator = SignatureDataGenerator(
