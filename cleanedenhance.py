@@ -220,7 +220,6 @@ for dataset_name, (embeddings, labels) in balanced_embeddings.items():
          .prefetch(tf.data.AUTOTUNE)
 
         # 🧱 Build and train model
-        base_network = create_base_network_signet(IMG_SHAPE, embedding_dim=EMBEDDING_SIZE)
         triplet_model = create_triplet_network_from_existing_base(base_network)
 
         triplet_model.compile(
@@ -281,7 +280,6 @@ for dataset_name, (embeddings, labels) in balanced_embeddings.items():
             )
 
         # ✅ Save model weights
-       # triplet_model.save_weights(f"{dataset_name}_triplet_model.weights.h5")
         base_network.save_weights(f"{dataset_name}_base_network.weights.h5")
 
         # --- Generate reference embeddings (once) ---
