@@ -3,6 +3,7 @@ import numpy as np
 from sklearn.decomposition import PCA
 import tensorflow as tf
 import time
+import csv
 import random
 import matplotlib.pyplot as plt
 from sklearn.metrics import (
@@ -96,6 +97,89 @@ def compute_far_frr(y_true, y_pred):
 
     return far, frr
 
+def apply_partial_clahe_per_writer(generator, images, labels, writer_ids, save_dir="clahe_samples"):
+    os.makedirs(save_dir, exist_ok=True)
+    processed = []
+    sample_log = []
+
+    for wid in np.unique(writer_ids):
+        mask = (writer_ids == wid)
+        imgs = images[mask]
+        lbls = labels[mask]
+
+        genuine = imgs[lbls == 1]
+        forged = imgs[lbls == 0]
+
+        gen_idx = np.random.choice(len(genuine), size=len(genuine)//2, replace=False) if len(genuine) > 1 else []
+        forg_idx = np.random.choice(len(forged), size=len(forged)//2, replace=False) if len(forged) > 1 else []
+
+        gen_processed = []
+        for i in range(len(genuine)):
+            raw_img = genuine[i]
+            if i in gen_idx:
+                clahe_img = generator.preprocess_image_from_array(raw_img)
+                gen_processed.append(clahe_img)
+
+                # Save one sample
+                if i < 1:
+                    path = save_clahe_comparison(raw_img, clahe_img, save_dir, wid, "genuine")
+                    sample_log.append([wid, "genuine", path])
+            else:
+                gen_processed.append(raw_img)
+
+        forg_processed = []
+        for i in range(len(forged)):
+            raw_img = forged[i]
+            if i in forg_idx:
+                clahe_img = generator.preprocess_image_from_array(raw_img)
+                forg_processed.append(clahe_img)
+
+                if i < 1:
+                    path = save_clahe_comparison(raw_img, clahe_img, save_dir, wid, "forged")
+                    sample_log.append([wid, "forged", path])
+            else:
+                forg_processed.append(raw_img)
+
+        processed.extend(gen_processed + forg_processed)
+
+    # Save CSV log
+    log_path = os.path.join(save_dir, "sample_log.csv")
+    with open(log_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Writer_ID", "Class", "Image_Path"])
+        writer.writerows(sample_log)
+
+    print(f"📝 CLAHE sample log saved to: {log_path}")
+    return np.array(processed)
+
+def save_clahe_comparison(raw_img, clahe_img, base_dir, writer_id, label):
+    # De-normalize if image is in [-1, 1]
+    def denorm(img):
+        if np.max(img) <= 1.0:
+            img = ((img * 0.5) + 0.5) * 255
+        return img.astype(np.uint8)
+
+    raw_img = denorm(raw_img)
+    clahe_img = denorm(clahe_img)
+
+    fig, axs = plt.subplots(1, 2, figsize=(6, 3))
+    axs[0].imshow(raw_img)
+    axs[0].set_title("Original")
+    axs[0].axis("off")
+
+    axs[1].imshow(clahe_img)
+    axs[1].set_title("CLAHE Enhanced")
+    axs[1].axis("off")
+
+    writer_folder = os.path.join(base_dir, f"writer_{writer_id:03d}")
+    os.makedirs(writer_folder, exist_ok=True)
+    save_path = os.path.join(writer_folder, f"{label}_sample.jpg")
+
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    return save_path
+
 # --- Dataset Configuration ---
 datasets = {
      "CEDAR": {
@@ -138,65 +222,114 @@ BATCH_SIZE = 32
 EPOCHS = 20
 MARGIN = 0.7
 
-# too many values to unpack (expected 2)
 
 # --- Storage ---
 balanced_embeddings = {}
 
-# --- CLAHE + Embedding + SMOTE ---
+# --- SMOTE → Partial CLAHE → Embedding + CSV Logging ---
 for dataset_name, dataset_config in datasets.items():
+    smote_folder = f"smote_{dataset_name}"
+    os.makedirs(smote_folder, exist_ok=True)
+
     print(f"\n--- Preprocessing {dataset_name} ---")
     try:
-        dataset_config = datasets[dataset_name]
         generator = SignatureDataGenerator(
             dataset={dataset_name: dataset_config},
             img_height=155,
             img_width=220,
             batch_sz=BATCH_SIZE,
         )
+
+        raw_images, class_labels = generator.get_all_data_with_labels()
+        _, writer_ids = generator.get_all_data_with_writer_ids()
+
+        smote = SMOTE(random_state=42)
+        Xb_list, yb_list, wid_list = [], [], []
+
+        # For CSV logging
+        csv_rows = []
+        csv_header = ["Dataset", "Writer_ID", "Before_Genuine", "Before_Forged", "After_Genuine", "After_Forged", "Synthetic_Added"]
         
+        pre_smote_csv = os.path.join(smote_folder, f"{dataset_name}_pre_smote_distribution.csv")
+        with open(pre_smote_csv, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Writer_ID", "Genuine_Before", "Forged_Before"])
 
-        # --- Merged SignatureDataGenerator ---
-        # generator = SignatureDataGenerator(
-        #     dataset=merged_train_config,
-        #     img_height=155,
-        #     img_width=220,
-        #     batch_sz=BATCH_SIZE
-        # )
+            for wid in np.unique(writer_ids):
+                mask = (writer_ids == wid)
+                _, yw = raw_images[mask], class_labels[mask]
+                counts = Counter(yw)
+                genuine = counts.get(1, 0)
+                forged = counts.get(0, 0)
+                writer.writerow([wid, genuine, forged])
 
-        # # ✅ Set this to label outputs and saved weights
-        # dataset_name = "Merged"
+        for wid in np.unique(writer_ids):
+            mask = (writer_ids == wid)
+            Xw, yw = raw_images[mask], class_labels[mask]
+            before_count = Counter(yw)
 
+            if len(np.unique(yw)) > 1:
+                Xw_flat = Xw.reshape(len(Xw), -1)
+                X_res, y_res = smote.fit_resample(Xw_flat, yw)
+                X_res = X_res.reshape((-1, 155, 220, 3))
+            else:
+                X_res, y_res = Xw, yw
 
-        generator.save_dataset_to_csv(f"{dataset_name}_signature_dataset.csv")
-        generator.visualize_clahe_effect(output_dir=f"CLAHE_Comparison_{dataset_name}")
+            after_count = Counter(y_res)
+            synth_added = len(y_res) - len(yw)
 
-        base_network = create_base_network_signet((155, 220, 3), embedding_dim=EMBEDDING_SIZE)
-        all_images, all_labels = generator.get_all_data_with_labels()  # CLAHE is applied here
-        embeddings = base_network.predict(all_images)
-        print(f"🔎 Class distribution before SMOTE: {Counter(all_labels)}")
+            # Log writer SMOTE info
+            csv_rows.append([
+                dataset_name,
+                wid,
+                before_count.get(1, 0),
+                before_count.get(0, 0),
+                after_count.get(1, 0),
+                after_count.get(0, 0),
+                synth_added
+            ])
 
-        if dataset_name == "CEDAR":
-            print("🧼 SMOTE skipped for CEDAR")
-            balanced_embeddings[dataset_name] = (embeddings, all_labels)
-        else:
-            smote = SMOTE(random_state=42)
-            X_res, y_res = smote.fit_resample(embeddings, all_labels)
-            print(f"✅ SMOTE applied. New distribution: {Counter(y_res)}")
-            balanced_embeddings[dataset_name] = (X_res, y_res)
+            Xb_list.append(X_res)
+            yb_list.append(y_res)
+            wid_list.append(np.full(len(X_res), wid))
+
+        X_bal = np.concatenate(Xb_list)
+        y_bal = np.concatenate(yb_list)
+        wids_bal = np.concatenate(wid_list)
+
+        print(f"✅ SMOTE done. Class dist: {Counter(y_bal)}")
+
+        # Save to CSV
+        post_smote_csv = os.path.join(smote_folder, f"{dataset_name}_post_smote_distribution.csv")
+        with open(post_smote_csv, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Writer_ID", "Genuine_After", "Forged_After", "Synthetic_Added"])
+            writer.writerows(csv_rows)
+
+        # Apply CLAHE to 50% genuine + 50% forged
+        X_clahe = apply_partial_clahe_per_writer(
+            generator,
+            X_bal,
+            y_bal,
+            wids_bal,
+            save_dir=f"clahe_samples/{dataset_name}"
+        )
+        print("🎨 CLAHE partially applied.")
+
+        balanced_embeddings[dataset_name] = (X_clahe, y_bal, wids_bal)
 
     except Exception as e:
         print(f"❌ Error in preprocessing {dataset_name}: {e}")
         continue
 
-
-# --- Training Using Triplet Loss + HNM  ---
-for dataset_name, (embeddings, labels) in balanced_embeddings.items():
+# --- Triplet Loss + Hard Negative Mining Training ---
+# Load processed images from balanced_embeddings
+for dataset_name, (images, labels, writer_ids) in balanced_embeddings.items():
     print(f"\n--- Training Triplet Model for {dataset_name} ---")
-    
     try:
-        # --- Generator ---
         dataset_config = datasets[dataset_name]
+        
+        # Create generator manually for that dataset (use dummy path)
         generator = SignatureDataGenerator(
             dataset={dataset_name: dataset_config},
             img_height=155,
@@ -204,35 +337,28 @@ for dataset_name, (embeddings, labels) in balanced_embeddings.items():
             batch_sz=BATCH_SIZE,
         )
 
+        # ✅ Use your generator's hard-mined triplet method
         base_network = create_base_network_signet(IMG_SHAPE, embedding_dim=EMBEDDING_SIZE)
+        anc, pos, neg = generator.generate_hard_mined_triplets(base_network)
 
-        # 🧠 Generate hard-mined triplets
-        anchor_imgs, positive_imgs, negative_imgs = generator.generate_hard_mined_triplets(base_network)
-        print(f"✅ Triplets generated: {len(anchor_imgs)}")
+        dummy_labels = np.zeros((len(anc),))
+        train_data = tf.data.Dataset.from_tensor_slices(((anc, pos, neg), dummy_labels)) \
+            .map(lambda x, y: ((x[0], x[1], x[2]), y)) \
+            .batch(BATCH_SIZE, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
-        dummy_labels = np.zeros((len(anchor_imgs),))
-
-        train_data = tf.data.Dataset.from_tensor_slices((
-            (anchor_imgs, positive_imgs, negative_imgs),
-            dummy_labels
-        )).map(lambda x, y: ((x[0], x[1], x[2]), y)) \
-         .batch(BATCH_SIZE, drop_remainder=True) \
-         .prefetch(tf.data.AUTOTUNE)
-
-        # 🧱 Build and train model
+        # Build and train model
         triplet_model = create_triplet_network_from_existing_base(base_network)
-
         triplet_model.compile(
             optimizer=RMSprop(learning_rate=0.001),
             loss=get_triplet_loss(margin=MARGIN)
         )
 
-        history = triplet_model.fit(
-            train_data,
-            epochs=EPOCHS,
-            verbose=1,
-        )
+        print("🚀 Training started...")
+        history = triplet_model.fit(train_data, epochs=EPOCHS, verbose=1)
 
+        # Save model weights
+        base_network.save_weights(f"{dataset_name}_base_network.weights.h5")
+        
         # --- Evaluation ---
         test_imgs, test_labels = generator.get_test_data()
         test_embeddings = base_network.predict(test_imgs)
@@ -254,16 +380,6 @@ for dataset_name, (embeddings, labels) in balanced_embeddings.items():
         acc, threshold = compute_accuracy_roc(distances, binary_labels)
         pred_labels = (distances < threshold).astype(int)
         f1 = f1_score(binary_labels, pred_labels)
-
-        def compute_far_frr(y_true, y_pred):
-            fp = np.sum((y_true == 0) & (y_pred == 1))
-            fn = np.sum((y_true == 1) & (y_pred == 0))
-            tn = np.sum((y_true == 0) & (y_pred == 0))
-            tp = np.sum((y_true == 1) & (y_pred == 1))
-            far = fp / (fp + tn) if (fp + tn) > 0 else 0
-            frr = fn / (fn + tp) if (fn + tp) > 0 else 0
-            return far, frr
-
         far, frr = compute_far_frr(binary_labels, pred_labels)
 
         print(f"📊 Accuracy: {acc:.4f} | F1: {f1:.4f} | Threshold: {threshold:.4f} | FAR: {far:.4f} | FRR: {frr:.4f}")
@@ -278,9 +394,6 @@ for dataset_name, (embeddings, labels) in balanced_embeddings.items():
                 f"FAR: {far:.4f}\n"
                 f"FRR: {frr:.4f}\n"
             )
-
-        # ✅ Save model weights
-        base_network.save_weights(f"{dataset_name}_base_network.weights.h5")
 
         # --- Generate reference embeddings (once) ---
         print(f"\n📦 Generating reference embeddings for {dataset_name}...")

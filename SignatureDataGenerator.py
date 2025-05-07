@@ -525,3 +525,24 @@ class SignatureDataGenerator:
             labels.append(0)
 
         return pairs, labels
+
+    def preprocess_image_from_array(self, img_array):
+        """Applies CLAHE to an already loaded image array."""
+        try:
+            if img_array.dtype != np.uint8:
+                img_array = (img_array * 255).astype(np.uint8)  # If normalized
+
+            img = cv2.resize(img_array, (self.img_width, self.img_height))
+            lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            cl = clahe.apply(l)
+            merged = cv2.merge((cl, a, b))
+            img = cv2.cvtColor(merged, cv2.COLOR_LAB2RGB)
+
+            img = img.astype(np.float32) / 255.0
+            img = (img - 0.5) / 0.5
+            return img
+        except Exception as e:
+            print(f"⚠ Error in preprocess_image_from_array: {e}")
+            return np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
