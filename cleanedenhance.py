@@ -182,21 +182,21 @@ def save_clahe_comparison(raw_img, clahe_img, base_dir, writer_id, label):
 
 # --- Dataset Configuration ---
 datasets = {
-     "CEDAR": {
-         "path": "Dataset/CEDAR",
-         "train_writers": list(range(260, 300)),
-         "test_writers": list(range(300, 315))
-     },
+    #  "CEDAR": {
+    #      "path": "Dataset/CEDAR",
+    #      "train_writers": list(range(260, 300)),
+    #      "test_writers": list(range(300, 315))
+    #  },
      "BHSig260_Bengali": {
          "path": "Dataset/BHSig260_Bengali",
          "train_writers": list(range(1, 71)),
          "test_writers": list(range(71, 101))
      },
-      "BHSig260_Hindi": {
-          "path": "Dataset/BHSig260_Hindi",
-          "train_writers": list(range(101, 191)), 
-          "test_writers": list(range(191, 260))   
-     },
+    #   "BHSig260_Hindi": {
+    #       "path": "Dataset/BHSig260_Hindi",
+    #       "train_writers": list(range(101, 191)), 
+    #       "test_writers": list(range(191, 260))   
+    #  },
 }
 
 # --- Merged Dataset for Training ---
@@ -219,8 +219,8 @@ for dataset_name, config in datasets.items():
 IMG_SHAPE = (155, 220, 3)
 EMBEDDING_SIZE = 128
 BATCH_SIZE = 32
-EPOCHS = 20
-MARGIN = 0.7
+EPOCHS = 40
+MARGIN = 1.0
 
 
 # --- Storage ---
@@ -317,6 +317,12 @@ for dataset_name, dataset_config in datasets.items():
         print("🎨 CLAHE partially applied.")
 
         balanced_embeddings[dataset_name] = (X_clahe, y_bal, wids_bal)
+        save_dir = "balanced_data"
+        os.makedirs(save_dir, exist_ok=True)
+
+        np.save(os.path.join(save_dir, f"{dataset_name}_X_bal.npy"), X_clahe)
+        np.save(os.path.join(save_dir, f"{dataset_name}_y_bal.npy"), y_bal)
+        np.save(os.path.join(save_dir, f"{dataset_name}_writer_ids.npy"), wids_bal)
 
     except Exception as e:
         print(f"❌ Error in preprocessing {dataset_name}: {e}")
@@ -353,14 +359,28 @@ for dataset_name, (images, labels, writer_ids) in balanced_embeddings.items():
             loss=get_triplet_loss(margin=MARGIN)
         )
 
+        early_stop = EarlyStopping(
+            monitor='loss',  # or 'val_loss' if you have validation data
+            patience=5,
+            restore_best_weights=True,
+            verbose=1
+        )
+
+
         print("🚀 Training started...")
-        history = triplet_model.fit(train_data, epochs=EPOCHS, verbose=1)
+        history = triplet_model.fit(
+            train_data, 
+            epochs=EPOCHS, 
+            verbose=1,
+            callbacks=[early_stop]
+            )
 
         # Save model weights
         base_network.save_weights(f"{dataset_name}_base_network.weights.h5")
         
         # --- Evaluation ---
-        test_imgs, test_labels = generator.get_test_data()
+        test_data = generator.get_test_data()
+        test_imgs, test_labels = test_data[0], test_data[1]
         test_embeddings = base_network.predict(test_imgs)
 
         # ✅ Manual distance + label generation
