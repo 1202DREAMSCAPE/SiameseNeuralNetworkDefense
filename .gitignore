@@ -13,3 +13,4 @@ CEDAR_base_network.weights.h5
 /Contrastive_Pairs
 /base_disembed
 /balanced_data
+/balance_logs
