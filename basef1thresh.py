@@ -26,6 +26,8 @@ import numpy as np
 
 np.random.seed(1337)
 random.seed(1337)
+tf.random.set_seed(1337)
+
 
 @register_keras_serializable()
 def euclidean_distance(vectors):

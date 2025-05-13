@@ -26,6 +26,7 @@ import numpy as np
 
 np.random.seed(1337)
 random.seed(1337)
+tf.random.set_seed(1337)
 
 @register_keras_serializable()
 def euclidean_distance(vectors):
@@ -383,7 +384,7 @@ for dataset_name, config in datasets.items():
     preds_f1 = (np.array(distances) <= best_threshold).astype(int)
     acc = accuracy_score(binary_labels, preds_f1)
 
-    print(f"✅ Using F1-optimized threshold: {best_threshold:.4f} (F1 = {best_f1:.4f}, Accuracy = {acc:.4f})")
+    #print(f"✅ Using F1-optimized threshold: {best_threshold:.4f} (F1 = {best_f1:.4f}, Accuracy = {acc:.4f})")
 
     # Diagnostic output
     print("\n=== Embedding Diagnostics ===")
