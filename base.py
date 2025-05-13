@@ -7,7 +7,7 @@ from tensorflow.keras.utils import register_keras_serializable
 from tensorflow.keras.optimizers import RMSprop
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 from sklearn.metrics import (
-    accuracy_score, f1_score, roc_auc_score, roc_curve, confusion_matrix, silhouette_score
+    accuracy_score, f1_score, roc_auc_score, roc_curve, confusion_matrix, silhouette_score, precision_score, recall_score
 )
 from utils import (
     visualize_pairs,
@@ -110,6 +110,35 @@ def compute_accuracy_roc(predictions, labels):
 
     return max_acc, best_threshold
 
+def plot_far_frr_bar_chart(roc_far, roc_frr, dataset_name='Dataset', save_path=None):
+    """
+    Plots a bar chart comparing FAR and FRR for the ROC-based threshold.
+
+    Parameters:
+        roc_far (float): False Acceptance Rate
+        roc_frr (float): False Rejection Rate
+        dataset_name (str): Dataset name for the plot title
+        save_path (str): Optional path to save the figure as a PNG
+    """
+    labels = ['FAR', 'FRR']
+    values = [roc_far, roc_frr]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    bars = ax.bar(labels, values, color=['skyblue', 'salmon'])
+
+    ax.set_ylim(0, 1)
+    ax.set_ylabel('Rate')
+    ax.set_title(f'{dataset_name} - FAR vs FRR (ROC Threshold)')
+
+    for bar in bars:
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width() / 2, height + 0.01, f'{height:.2f}', ha='center', va='bottom')
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path)
+
 
 def evaluate_sop1(genuine_d, forged_d, binary_labels, distances, threshold):
     metrics = {
@@ -144,6 +173,33 @@ def evaluate_sop1(genuine_d, forged_d, binary_labels, distances, threshold):
 
     return metrics
 
+def add_extended_sop1_metrics(sop1_metrics, binary_labels, distances, threshold):
+    """
+    Adds TPR, TNR, Precision, and Recall to the SOP1 metrics dictionary.
+
+    Parameters:
+        sop1_metrics (dict): Existing SOP1 metrics dictionary.
+        binary_labels (list or np.array): True binary labels (1 = genuine, 0 = forged).
+        distances (list or np.array): Computed distances between embedding pairs.
+        threshold (float): Distance threshold for classification.
+
+    Returns:
+        dict: Updated SOP1 metrics with additional diagnostic metrics.
+    """
+    preds = (np.array(distances) <= threshold).astype(int)
+    labels = np.array(binary_labels)
+
+    TP = np.sum((labels == 1) & (preds == 1))
+    TN = np.sum((labels == 0) & (preds == 0))
+    FP = np.sum((labels == 0) & (preds == 1))
+    FN = np.sum((labels == 1) & (preds == 0))
+
+    sop1_metrics['SOP1_TPR'] = TP / (TP + FN) if (TP + FN) > 0 else np.nan  # True Positive Rate
+    sop1_metrics['SOP1_TNR'] = TN / (TN + FP) if (TN + FP) > 0 else np.nan  # True Negative Rate
+    sop1_metrics['SOP1_Precision'] = precision_score(labels, preds) if (TP + FP) > 0 else np.nan
+    sop1_metrics['SOP1_Recall'] = recall_score(labels, preds) if (TP + FN) > 0 else np.nan
+
+    return sop1_metrics
 
 def evaluate_sop2(embeddings, labels):
     metrics = {}
@@ -339,24 +395,30 @@ for dataset_name, config in datasets.items():
     print(f"Genuine distances - Min: {np.min(genuine_d):.4f}, Max: {np.max(genuine_d):.4f}")
     print(f"Forged distances - Min: {np.min(forged_d):.4f}, Max: {np.max(forged_d):.4f}")
 
-    # Visualization
-    plt.figure(figsize=(12, 4))
-    sns.kdeplot(genuine_d, label='Genuine', fill=True)
-    sns.kdeplot(forged_d, label='Forged', fill=True)
-    plt.axvline(x=best_threshold, color='r', linestyle='--', label='Best Threshold')
-    plt.title("Distance Distributions with Optimal Threshold")
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
     # Metric evaluation
     sop1_metrics = evaluate_sop1(
-    genuine_d=genuine_d,
-    forged_d=forged_d,
-    binary_labels=binary_labels,
-    distances=distances,
-    threshold=best_threshold
-)
+        genuine_d=genuine_d,
+        forged_d=forged_d,
+        binary_labels=binary_labels,
+        distances=distances,
+        threshold=best_threshold
+    )
+
+    # Add extra SOP1 metrics (TPR, TNR, Precision, Recall)
+    sop1_metrics = add_extended_sop1_metrics(
+        sop1_metrics,
+        binary_labels=binary_labels,
+        distances=distances,
+        threshold=best_threshold
+    )
+
+    # Visualization (FAR vs FRR bar chart)
+    plot_far_frr_bar_chart(
+        roc_far=sop1_metrics['SOP1_FAR'],
+        roc_frr=sop1_metrics['SOP1_FRR'],
+        dataset_name=dataset_name,
+        save_path=f"{dataset_name}_ROC_FAR_FRR_BarChart.png"
+    )
 
     # ========== SOP 2 Evaluation ==========
     sop2_metrics = evaluate_sop2(embeddings, test_labels)
@@ -433,41 +495,5 @@ for dataset_name, config in datasets.items():
     plt.tight_layout()
     plt.savefig(f"{dataset_name}_baseline_loss_curve.png")
     plt.close()
-
-# ====== Sample Visualization of Test Pairs (Qualitative) ======
-# Sample test pairs for visualization
-sampled_pairs = []
-sampled_labels = []
-
-# Build up to 10 genuine-genuine and 10 genuine-forged pairs from test set
-count_genuine = 0
-count_forged = 0
-
-for i in range(len(test_images)):
-    for j in range(i + 1, len(test_images)):
-        if count_genuine >= 10 and count_forged >= 10:
-            break
-
-        label_i = test_labels[i]
-        label_j = test_labels[j]
-
-        if label_i == 0 and label_j == 0 and count_genuine < 10:
-            sampled_pairs.append((test_images[i], test_images[j]))
-            sampled_labels.append(1)
-            count_genuine += 1
-        elif (label_i == 0 and label_j == 1 or label_i == 1 and label_j == 0) and count_forged < 10:
-            sampled_pairs.append((test_images[i], test_images[j]))
-            sampled_labels.append(0)
-            count_forged += 1
-
-# Call visualization function (saves pair images and PCA)
-visualize_pairs(
-    pairs=sampled_pairs,
-    labels=np.array(sampled_labels),
-    base_network=base_network,
-    output_dir=f"{dataset_name}_pair_visualization"
-)
-
-plot_distance_distributions(pairs, labels, base_network, title="SigNet Evaluation", save_dir="SigNet_Eval")
 
 print(f"📋 Finished evaluation for {dataset_name}. Current CSV updated.\n")

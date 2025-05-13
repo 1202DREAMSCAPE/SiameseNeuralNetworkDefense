@@ -80,26 +80,35 @@ def create_base_network_signet(input_shape):
     ])
     return model
 
-def compute_threshold_f1(distances, labels, num_thresholds=1000):
+def compute_accuracy_roc(predictions, labels):
     """
-    Sweep over 'num_thresholds' equally spaced distances between
-    min(distances) and max(distances), returning the threshold
-    that yields the highest F1-Score.
+    Compute ROC-based accuracy with the best threshold.
+    Returns:
+        max_acc: Best accuracy found
+        best_threshold: Distance threshold yielding best ROC-based accuracy
     """
-    d = np.array(distances)
-    lab = np.array(labels)
+    dmax = np.max(predictions)
+    dmin = np.min(predictions)
+    nsame = np.sum(labels == 1)
+    ndiff = np.sum(labels == 0)
+   
+    step = 0.01
+    max_acc = 0
+    best_threshold = 0.0
 
-    dmin, dmax = d.min(), d.max()
-    best_thr = dmin
-    best_f1  = 0.0
+    for d in np.arange(dmin, dmax + step, step):
+        idx1 = predictions.ravel() <= d
+        idx2 = predictions.ravel() > d
+       
+        tpr = float(np.sum(labels[idx1] == 1)) / nsame if nsame > 0 else 0
+        tnr = float(np.sum(labels[idx2] == 0)) / ndiff if ndiff > 0 else 0
+        acc = 0.5 * (tpr + tnr)
+       
+        if acc > max_acc:
+            max_acc = acc
+            best_threshold = d
 
-    for thr in np.linspace(dmin, dmax, num_thresholds):
-        preds = (d <= thr).astype(int)  # 1=genuine, 0=forged
-        f1 = f1_score(lab, preds)
-        if f1 > best_f1:
-            best_f1, best_thr = f1, thr
-
-    return best_thr, best_f1
+    return max_acc, best_threshold
 
 def plot_far_frr_bar_chart(roc_far, roc_frr, dataset_name='Dataset', save_path=None):
     """
@@ -335,13 +344,13 @@ for dataset_name, config in datasets.items():
     # Optional but recommended: Load best weights from disk
 
     # Save final model weights (Siamese full model)
-    model.save_weights(os.path.join(weights_dir, f"{dataset_name}_siamese_model_f1.weights.h5"))
+    model.save_weights(os.path.join(weights_dir, f"{dataset_name}_siamese_model.weights.h5"))
 
     # Save only the base feature extractor (SigNet)
-    base_network.save_weights(os.path.join(weights_dir, f"{dataset_name}_signet_network_f1.weights.h5"))
+    base_network.save_weights(os.path.join(weights_dir, f"{dataset_name}_signet_network.weights.h5"))
 
     # Save entire model (architecture + weights)
-    model.save(f"{dataset_name}_model_f1.h5")
+    model.save(f"{dataset_name}_model.h5")
 
     print(f"✅ Saved all weights and model for {dataset_name}")
 
@@ -379,7 +388,7 @@ for dataset_name, config in datasets.items():
     binary_labels = [1] * len(genuine_d) + [0] * len(forged_d)
 
     # Compute ROC-based accuracy and best threshold
-    acc, best_threshold = compute_threshold_f1(np.array(distances), np.array(binary_labels))
+    acc, best_threshold = compute_accuracy_roc(np.array(distances), np.array(binary_labels))
 
     # Diagnostic output
     print("\n=== Embedding Diagnostics ===")
@@ -408,7 +417,7 @@ for dataset_name, config in datasets.items():
         roc_far=sop1_metrics['SOP1_FAR'],
         roc_frr=sop1_metrics['SOP1_FRR'],
         dataset_name=dataset_name,
-        save_path=f"{dataset_name}_ROC_FAR_FRR_BarChart_f1.png"
+        save_path=f"{dataset_name}_ROC_FAR_FRR_BarChart.png"
     )
 
     # ========== SOP 2 Evaluation ==========
@@ -446,7 +455,7 @@ for dataset_name, config in datasets.items():
         "F1_Score": f1
     })
 
-    pd.DataFrame(results).to_csv("SigNet_Baseline_f1_SOP_Results.csv", index=False)
+    pd.DataFrame(results).to_csv("SigNet_Baseline_SOP_Results.csv", index=False)
     print(f"✅ Metrics saved for {dataset_name}")
 
     # ========== Visualization ==========
@@ -472,7 +481,7 @@ for dataset_name, config in datasets.items():
         plt.title("Noise-Induced Embedding Shifts")
 
     plt.tight_layout()
-    plt.savefig(f"{dataset_name}_f1_baseline_metrics.png")
+    plt.savefig(f"{dataset_name}_baseline_metrics.png")
     plt.close()
 
     # ====== Loss Curve Plot (Training vs Validation) ======
@@ -487,4 +496,4 @@ for dataset_name, config in datasets.items():
     plt.savefig(f"{dataset_name}_baseline_loss_curve.png")
     plt.close()
 
-print(f"📋 Finished evaluation for {dataset_name} f1. Current CSV updated.\n")
+print(f"📋 Finished evaluation for {dataset_name}. Current CSV updated.\n")

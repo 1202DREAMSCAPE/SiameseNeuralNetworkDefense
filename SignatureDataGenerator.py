@@ -83,7 +83,6 @@ class SignatureDataGenerator:
         return tf.data.Dataset.from_generator(generator, output_signature=output_signature).batch(self.batch_sz)
 
     def preprocess_image(self, img_path):
-        """Load and preprocess an image with CLAHE for contrast enhancement."""
         if not isinstance(img_path, str) or not os.path.exists(img_path):
             print(f"⚠ Warning: Missing image file: {img_path if isinstance(img_path, str) else 'Invalid Path Type'}")
             return np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
@@ -96,14 +95,6 @@ class SignatureDataGenerator:
 
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img = cv2.resize(img, (self.img_width, self.img_height))
-
-            # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
-            lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
-            l, a, b = cv2.split(lab)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-            cl = clahe.apply(l)
-            merged = cv2.merge((cl, a, b))
-            img = cv2.cvtColor(merged, cv2.COLOR_LAB2RGB)
 
             # Normalize to [-1, 1]
             img = img.astype(np.float32) / 255.0
@@ -527,7 +518,11 @@ class SignatureDataGenerator:
         return pairs, labels
 
     def preprocess_image_from_array(self, img_array):
-        """Applies CLAHE to an already loaded image array."""
+        """
+        Applies CLAHE (Contrast Limited Adaptive Histogram Equalization) 
+        to the L-channel of an RGB image passed as a NumPy array.
+        Normalizes the output to [-1, 1].
+        """
         try:
             if img_array.dtype != np.uint8:
                 img_array = (img_array * 255).astype(np.uint8)  # If normalized

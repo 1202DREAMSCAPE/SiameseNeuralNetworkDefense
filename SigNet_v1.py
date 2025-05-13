@@ -1,6 +1,7 @@
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras import layers
 from tensorflow.keras.layers import Dense, Dropout, Input, Lambda, Flatten, Conv2D, MaxPooling2D, BatchNormalization, ZeroPadding2D
 from tensorflow.keras.optimizers import RMSprop
 #from tensorflow.keras import backend as K
@@ -108,40 +109,35 @@ def generate_hard_mined_triplets(self, base_network, batch_size=32):
     print(f"✅ Total hard-mined triplets: {len(anchor_list)}")
     return anchor_list, positive_list, negative_list
 
-# ✅ Define the SigNet Base Network Architecture with Multi-Scale Feature Learning
-def create_base_network_signet_dilated(input_shape, embedding_dim=128):
-    """
-    Builds the base convolutional neural network with dilated convolutions.
-    """
-    seq = Sequential()
-    
-    # First convolutional block
-    seq.add(Conv2D(96, (11, 11), activation='relu', strides=(4, 4), input_shape=input_shape))
-    seq.add(MaxPooling2D((2, 2), strides=(1, 1)))  # Adjusted pooling
-    print(f"Layer Output Shape after First Pooling: {seq.output_shape}")
-    
-    # Second convolutional block with dilation
-    seq.add(Conv2D(256, (5, 5), activation='relu', dilation_rate=2))
-    seq.add(MaxPooling2D((2, 2), strides=(1, 1)))  # Adjusted pooling
-    seq.add(Dropout(0.3))
-    print(f"Layer Output Shape after Second Pooling: {seq.output_shape}")
-    
-    # Third convolutional block
-    seq.add(Conv2D(384, (3, 3), activation='relu'))
-    seq.add(Conv2D(256, (3, 3), activation='relu'))
-    seq.add(MaxPooling2D((2, 2), strides=(1, 1)))  # Adjusted pooling
-    seq.add(Dropout(0.3))
-    print(f"Layer Output Shape after Third Pooling: {seq.output_shape}")
-    
-    # Fully connected layers
-    seq.add(Flatten())
-    seq.add(Dense(1024, activation='relu'))
-    seq.add(Dropout(0.5))
-    seq.add(Dense(embedding_dim, activation='linear', name="embedding_layer"))
+def create_base_network_signet(input_shape, embedding_dim=128):
+    model = Sequential([
+        Input(shape=input_shape),
 
-    # ✅ Normalize the output to unit length
-    seq.add(Lambda(lambda x: K.l2_normalize(x, axis=1), name="l2_normalized"))
-    return seq
+        layers.Conv2D(96, (11, 11), activation='relu', strides=(4, 4)),
+        layers.BatchNormalization(),
+        layers.MaxPooling2D(pool_size=(3, 3), strides=(2, 2)),
+
+        layers.ZeroPadding2D((2, 2)),
+        layers.Conv2D(256, (5, 5), activation='relu'),
+        layers.BatchNormalization(),
+        layers.MaxPooling2D(pool_size=(3, 3), strides=(2, 2)),
+        layers.Dropout(0.3),
+
+        layers.ZeroPadding2D((1, 1)),
+        layers.Conv2D(384, (3, 3), activation='relu'),
+        layers.ZeroPadding2D((1, 1)),
+        layers.Conv2D(256, (3, 3), activation='relu'),
+        layers.MaxPooling2D(pool_size=(3, 3), strides=(2, 2)),
+        layers.Dropout(0.3),
+
+        layers.Flatten(),
+        layers.Dense(1024, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0005)),
+        layers.Dropout(0.5),
+        layers.Dense(embedding_dim, activation='linear', kernel_regularizer=tf.keras.regularizers.l2(0.0005)),
+
+        layers.Lambda(lambda x: K.l2_normalize(x, axis=1), name="l2_normalized")
+    ])
+    return model
 
 # ✅ Define the Triplet Network (Updated)
 def create_triplet_network_from_existing_base(base_network):
