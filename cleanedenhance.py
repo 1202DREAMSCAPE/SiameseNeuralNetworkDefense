@@ -323,21 +323,21 @@ def evaluate_sop3(clean_emb, noisy_emb, clean_labels, threshold):
 
 # --- Dataset Configuration ---
 datasets = {
-    #  "CEDAR": {
-    #      "path": "Dataset/CEDAR",
-    #      "train_writers": list(range(260, 300)),
-    #      "test_writers": list(range(300, 315))
-    #  },
+     "CEDAR": {
+         "path": "Dataset/CEDAR",
+         "train_writers": list(range(260, 300)),
+         "test_writers": list(range(300, 315))
+     },
      "BHSig260_Bengali": {
          "path": "Dataset/BHSig260_Bengali",
          "train_writers": list(range(1, 71)),
          "test_writers": list(range(71, 101))
      },
-    #   "BHSig260_Hindi": {
-    #       "path": "Dataset/BHSig260_Hindi",
-    #       "train_writers": list(range(101, 191)), 
-    #       "test_writers": list(range(191, 260))   
-    #  },
+      "BHSig260_Hindi": {
+          "path": "Dataset/BHSig260_Hindi",
+          "train_writers": list(range(101, 191)), 
+          "test_writers": list(range(191, 260))   
+     },
 }
 
 IMG_SHAPE = (155, 220, 3)
@@ -440,6 +440,7 @@ for dataset_name in datasets.keys():
 
         # Save entire model (architecture + weights)
         triplet_model.save(f"{dataset_name}_ENHANCED_triplet_model.h5")
+
 
     except Exception as e:
         print(f"❌ Training failed for {dataset_name}")
@@ -578,7 +579,7 @@ for dataset_name in datasets.keys():
         print(f"\n📦 Generating reference embeddings for {dataset_name}...")
 
         base_network = create_base_network_signet(IMG_SHAPE, embedding_dim=EMBEDDING_SIZE)
-        base_network.load_weights(f"{dataset_name}_base_network.weights.h5")
+        base_network.load_weights(f"{dataset_name}_ENHANCED_base_network.weights.h5")
 
         reference_embeddings = []
         reference_labels = []
