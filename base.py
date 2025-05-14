@@ -21,7 +21,6 @@ import time
 import cv2
 import seaborn as sns
 from SignatureDataGenerator import SignatureDataGenerator
-import numpy as np
 
 np.random.seed(1337)
 random.seed(1337)
@@ -92,7 +91,7 @@ def compute_accuracy_roc(predictions, labels):
     nsame = np.sum(labels == 1)
     ndiff = np.sum(labels == 0)
    
-    step = 0.01
+    step = 0.001
     max_acc = 0
     best_threshold = 0.0
 
@@ -297,7 +296,8 @@ for dataset_name, config in datasets.items():
     )
     pairs, labels = generator.generate_pairs()
     labels = np.array(labels).astype(np.float32)
-    print(f"✅ Loaded {len(pairs)} pairs with labels.")
+
+    #print(f"✅ Loaded {len(pairs)} pairs with labels.")
     # Train/val split
     val_split = int(0.9 * len(pairs))
     train_pairs, val_pairs = pairs[:val_split], pairs[val_split:]
@@ -356,7 +356,7 @@ for dataset_name, config in datasets.items():
 
     # ========== Evaluation ==========
     # 1. Get test data
-    test_images, test_labels = generator.get_unbatched_data()
+    test_images, test_labels = generator.get_unbatched_data()    
     clean_imgs, clean_labels = test_images, test_labels  # Store clean versions for SOP3
     noisy_imgs, _ = generator.get_unbatched_data(noisy=True)
     noisy_imgs = np.array(noisy_imgs)
@@ -371,24 +371,26 @@ for dataset_name, config in datasets.items():
 
     # ========== SOP 1 Evaluation ==========
     genuine_d, forged_d, distances, binary_labels = [], [], [], []
-
     for i in range(len(embeddings)):
         for j in range(i + 1, len(embeddings)):
             dist = np.linalg.norm(embeddings[i] - embeddings[j])
             label_i = test_labels[i]
             label_j = test_labels[j]
 
-            if label_i == 0 and label_j == 0:
+            if label_i == label_j:  # same writer → genuine
                 genuine_d.append(dist)
-            elif (label_i == 0 and label_j == 1) or (label_i == 1 and label_j == 0):
+            else:  # different writers → forged
                 forged_d.append(dist)
 
     # Combine distances and labels
-    distances = genuine_d + forged_d
-    binary_labels = [1] * len(genuine_d) + [0] * len(forged_d)
+    distances = np.array(genuine_d + forged_d)
+    binary_labels = np.array([1] * len(genuine_d) + [0] * len(forged_d))
 
     # Compute ROC-based accuracy and best threshold
-    acc, best_threshold = compute_accuracy_roc(np.array(distances), np.array(binary_labels))
+    acc, best_threshold = compute_accuracy_roc(distances, binary_labels)
+    preds = (distances <= best_threshold).astype(int)
+    f1 = f1_score(binary_labels, preds)
+
 
     # Diagnostic output
     print("\n=== Embedding Diagnostics ===")
@@ -443,7 +445,7 @@ for dataset_name, config in datasets.items():
         sop3_metrics = {k: -1 for k in ['SOP3_Mean_PSNR', 'SOP3_Accuracy_Drop', 'SOP3_Mean_Shift', 'SOP3_Max_Shift']}
 
     # ========== Collect and Save Results ==========
-    f1 = f1_score(binary_labels, [1 if d > best_threshold else 0 for d in distances])
+    
 
     results.append({
         "Dataset": dataset_name,

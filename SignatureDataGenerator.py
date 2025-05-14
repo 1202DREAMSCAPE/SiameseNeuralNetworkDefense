@@ -155,8 +155,6 @@ class SignatureDataGenerator:
                     writer_ids.append(writer)
         return np.array(images), np.array(writer_ids)
 
-
-
     def log_triplet(self, writer, anchor_path, positive_path, negative_writer, negative_path, negative_label):
         """Log the generated triplet to a CSV file for monitoring."""
         csv_path = f"triplet_monitoring_{self.dataset_name}.csv"
@@ -338,7 +336,6 @@ class SignatureDataGenerator:
         image_complexities = []
 
         for dataset_path, writer in self.train_writers:
-            # 🛠 Handle Hybrid's writer dictionary case
             if isinstance(writer, dict):
                 writer_id = writer["writer"]
                 dataset_path = writer["path"]
@@ -480,39 +477,42 @@ class SignatureDataGenerator:
 
     def generate_pairs(self):
         """
-        Generate contrastive pairs: 
-        - Positives: 2 genuine samples from same writer
-        - Negatives: 1 genuine + 1 forged from same writer
+        Generate positive and negative pairs for contrastive loss training.
+        Returns:
+            pairs: list of (img1, img2)
+            labels: list of 1 (genuine pair) or 0 (forged/different writer pair)
         """
+        import random
+
+        all_images, all_labels = self.get_all_data_with_labels()
+        label_to_images = {}
+
+        for img, label in zip(all_images, all_labels):
+            if label not in label_to_images:
+                label_to_images[label] = []
+            label_to_images[label].append(img)
+
         pairs = []
         labels = []
 
-        for dataset_path, writer in self.train_writers:
-            genuine_dir = os.path.join(dataset_path, f"writer_{writer:03d}", "genuine")
-            forged_dir = os.path.join(dataset_path, f"writer_{writer:03d}", "forged")
-
-            # Load genuine and forged images
-            genuine_files = [os.path.join(genuine_dir, f) for f in os.listdir(genuine_dir) if f.endswith((".png", ".jpg"))]
-            forged_files = [os.path.join(forged_dir, f) for f in os.listdir(forged_dir) if f.endswith((".png", ".jpg"))]
-
-            # -- Positive pairs: 2 genuine from same writer
-            if len(genuine_files) >= 2:
-                for i in range(len(genuine_files) - 1):
-                    img1 = self.preprocess_image(genuine_files[i])
-                    img2 = self.preprocess_image(genuine_files[i + 1])
-                    pairs.append((img1, img2))
+        # Create positive pairs (same label)
+        for label in label_to_images:
+            images = label_to_images[label]
+            if len(images) > 1:
+                for i in range(len(images) - 1):
+                    pairs.append((images[i], images[i + 1]))
                     labels.append(1)
 
-            # -- Negative pairs: 1 genuine + 1 forged from same writer
-            min_len = min(len(genuine_files), len(forged_files))
-            for i in range(min_len):
-                img1 = self.preprocess_image(genuine_files[i])
-                img2 = self.preprocess_image(forged_files[i])
-                pairs.append((img1, img2))
-                labels.append(0)
+        # Create negative pairs (different labels)
+        all_labels_set = list(label_to_images.keys())
+        for _ in range(len(pairs)):  # match the number of positive pairs
+            label1, label2 = random.sample(all_labels_set, 2)
+            img1 = random.choice(label_to_images[label1])
+            img2 = random.choice(label_to_images[label2])
+            pairs.append((img1, img2))
+            labels.append(0)
 
         return pairs, labels
-
 
     def preprocess_image_from_array(self, img_array):
         """
@@ -538,3 +538,38 @@ class SignatureDataGenerator:
         except Exception as e:
             print(f"⚠ Error in preprocess_image_from_array: {e}")
             return np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
+
+    def generate_pairs_from_loaded(self, images, labels):
+        """
+        Generate contrastive pairs (positive/negative) from preloaded images and labels.
+        Assumes label 0 = genuine, label 1 = forged.
+        """
+        import random
+
+        label_to_images = {}
+        for img, lbl in zip(images, labels):
+            if lbl not in label_to_images:
+                label_to_images[lbl] = []
+            label_to_images[lbl].append(img)
+
+        pairs = []
+        pair_labels = []
+
+        # Positive pairs (same class)
+        for label in label_to_images:
+            imgs = label_to_images[label]
+            if len(imgs) > 1:
+                for i in range(len(imgs) - 1):
+                    pairs.append((imgs[i], imgs[i + 1]))
+                    pair_labels.append(1)
+
+        # Negative pairs (different classes)
+        label_keys = list(label_to_images.keys())
+        for _ in range(len(pairs)):
+            l1, l2 = random.sample(label_keys, 2)
+            img1 = random.choice(label_to_images[l1])
+            img2 = random.choice(label_to_images[l2])
+            pairs.append((img1, img2))
+            pair_labels.append(0)
+
+        return pairs, pair_labels
