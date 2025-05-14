@@ -18,11 +18,10 @@ from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 import pandas as pd
 import time
+import csv
 import cv2
 import seaborn as sns
 from SignatureDataGenerator import SignatureDataGenerator
-import numpy as np
-
 
 np.random.seed(1337)
 random.seed(1337)
@@ -39,23 +38,6 @@ def get_contrastive_loss(margin=1.0):
         margin_square = tf.square(tf.maximum(margin - y_pred, 0))
         return tf.reduce_mean(y_true * square_pred + (1 - y_true) * margin_square)
     return contrastive_loss
-
-# Preprocessing
-def preprocess_image_simple(self, img_path):
-    if not isinstance(img_path, str) or not os.path.exists(img_path):
-        return np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
-    try:
-        img = cv2.imread(img_path)
-        if img is None:
-            return np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = cv2.resize(img, (self.img_width, self.img_height))
-        img = img.astype(np.float32) / 255.0
-        return (img - 0.5) / 0.5
-    except Exception:
-        return np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
-
-SignatureDataGenerator.preprocess_image = preprocess_image_simple
 
 def create_base_network_signet(input_shape):
     model = Sequential([
@@ -83,26 +65,35 @@ def create_base_network_signet(input_shape):
     ])
     return model
 
-def compute_threshold_f1(distances, labels, num_thresholds=1000):
+def compute_accuracy_roc(predictions, labels):
     """
-    Sweep over 'num_thresholds' equally spaced distances between
-    min(distances) and max(distances), returning the threshold
-    that yields the highest F1-Score.
+    Compute ROC-based accuracy with the best threshold.
+    Returns:
+        max_acc: Best accuracy found
+        best_threshold: Distance threshold yielding best ROC-based accuracy
     """
-    d = np.array(distances)
-    lab = np.array(labels)
+    dmax = np.max(predictions)
+    dmin = np.min(predictions)
+    nsame = np.sum(labels == 1)
+    ndiff = np.sum(labels == 0)
+   
+    step = 0.01
+    max_acc = 0
+    best_threshold = 0.0
 
-    dmin, dmax = d.min(), d.max()
-    best_thr = dmin
-    best_f1  = 0.0
+    for d in np.arange(dmin, dmax + step, step):
+        idx1 = predictions.ravel() <= d
+        idx2 = predictions.ravel() > d
+       
+        tpr = float(np.sum(labels[idx1] == 1)) / nsame if nsame > 0 else 0
+        tnr = float(np.sum(labels[idx2] == 0)) / ndiff if ndiff > 0 else 0
+        acc = 0.5 * (tpr + tnr)
+       
+        if acc > max_acc:
+            max_acc = acc
+            best_threshold = d
 
-    for thr in np.linspace(dmin, dmax, num_thresholds):
-        preds = (d <= thr).astype(int)  # 1=genuine, 0=forged
-        f1 = f1_score(lab, preds)
-        if f1 > best_f1:
-            best_f1, best_thr = f1, thr
-
-    return best_thr, best_f1
+    return max_acc, best_threshold
 
 def plot_far_frr_bar_chart(roc_far, roc_frr, dataset_name='Dataset', save_path=None):
     """
@@ -133,6 +124,89 @@ def plot_far_frr_bar_chart(roc_far, roc_frr, dataset_name='Dataset', save_path=N
     if save_path:
         plt.savefig(save_path)
 
+def apply_partial_clahe_per_writer(generator, images, labels, writer_ids, save_dir="clahe_samples"):
+    os.makedirs(save_dir, exist_ok=True)
+    processed = []
+    sample_log = []
+
+    for wid in np.unique(writer_ids):
+        mask = (writer_ids == wid)
+        imgs = images[mask]
+        lbls = labels[mask]
+
+        genuine = imgs[lbls == 0]
+        forged = imgs[lbls == 1]
+
+
+        gen_idx = np.random.choice(len(genuine), size=len(genuine)//2, replace=False) if len(genuine) > 1 else []
+        forg_idx = np.random.choice(len(forged), size=len(forged)//2, replace=False) if len(forged) > 1 else []
+
+        gen_processed = []
+        for i in range(len(genuine)):
+            raw_img = genuine[i]
+            if i in gen_idx:
+                clahe_img = generator.preprocess_image_from_array(raw_img)
+                gen_processed.append(clahe_img)
+
+                # Save one sample
+                if i < 1:
+                    path = save_clahe_comparison(raw_img, clahe_img, save_dir, wid, "genuine")
+                    sample_log.append([wid, "genuine", path])
+            else:
+                gen_processed.append(raw_img)
+
+        forg_processed = []
+        for i in range(len(forged)):
+            raw_img = forged[i]
+            if i in forg_idx:
+                clahe_img = generator.preprocess_image_from_array(raw_img)
+                forg_processed.append(clahe_img)
+
+                if i < 1:
+                    path = save_clahe_comparison(raw_img, clahe_img, save_dir, wid, "forged")
+                    sample_log.append([wid, "forged", path])
+            else:
+                forg_processed.append(raw_img)
+
+        processed.extend(gen_processed + forg_processed)
+
+    # Save CSV log
+    log_path = os.path.join(save_dir, "sample_log.csv")
+    with open(log_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Writer_ID", "Class", "Image_Path"])
+        writer.writerows(sample_log)
+
+    print(f"📝 CLAHE sample log saved to: {log_path}")
+    return np.array(processed)
+
+def save_clahe_comparison(raw_img, clahe_img, base_dir, writer_id, label):
+    # De-normalize if image is in [-1, 1]
+    def denorm(img):
+        if np.max(img) <= 1.0:
+            img = ((img * 0.5) + 0.5) * 255
+        return img.astype(np.uint8)
+
+    raw_img = denorm(raw_img)
+    clahe_img = denorm(clahe_img)
+
+    fig, axs = plt.subplots(1, 2, figsize=(6, 3))
+    axs[0].imshow(raw_img)
+    axs[0].set_title("Original")
+    axs[0].axis("off")
+
+    axs[1].imshow(clahe_img)
+    axs[1].set_title("CLAHE Enhanced")
+    axs[1].axis("off")
+
+    writer_folder = os.path.join(base_dir, f"writer_{writer_id:03d}")
+    os.makedirs(writer_folder, exist_ok=True)
+    save_path = os.path.join(writer_folder, f"{label}_sample.jpg")
+
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    return save_path
 
 def evaluate_sop1(genuine_d, forged_d, binary_labels, distances, threshold):
     metrics = {
@@ -262,7 +336,7 @@ def evaluate_sop3(clean_emb, noisy_emb, clean_labels, threshold):
 IMG_SHAPE = (155, 220, 3)
 BATCH_SIZE = 32
 EPOCHS = 20
-MARGIN = 1.0
+MARGIN = 0.7
 
 datasets = {
     "CEDAR": {
@@ -284,19 +358,57 @@ datasets = {
 
 results = []
 
+print("🔧 Starting CLAHE preprocessing...")
+
+for dataset_name, config in datasets.items():
+    print(f"\n🧪 Preprocessing {dataset_name}")
+
+    try:
+        generator = SignatureDataGenerator(
+            dataset={dataset_name: config},
+            img_height=IMG_SHAPE[0],
+            img_width=IMG_SHAPE[1],
+            batch_sz=BATCH_SIZE,
+        )
+
+        images, class_labels = generator.get_all_data_with_labels()
+        _, writer_ids = generator.get_all_data_with_writer_ids()
+
+        X_clahe = apply_partial_clahe_per_writer(
+            generator,
+            images,
+            class_labels,
+            writer_ids,
+            save_dir=f"clahe_samples/{dataset_name}"
+        )
+
+        os.makedirs("clahe_data", exist_ok=True)
+        np.save(f"clahe_data/{dataset_name}_X.npy", X_clahe)
+        np.save(f"clahe_data/{dataset_name}_y.npy", class_labels)
+        np.save(f"clahe_data/{dataset_name}_writer_ids.npy", writer_ids)
+
+        print(f"✅ CLAHE preprocessing saved for {dataset_name}")
+    except Exception as e:
+        print(f"❌ Error preprocessing {dataset_name}: {e}")
+
 for dataset_name, config in datasets.items():
     print(f"\n📦 Processing Base Model for Dataset {dataset_name}")
 
-    # Data loading
+    os.makedirs("clahe_data", exist_ok=True)
+    images = np.load(f"clahe_data/{dataset_name}_X.npy")
+    labels = np.load(f"clahe_data/{dataset_name}_y.npy")
+
     generator = SignatureDataGenerator(
         dataset={dataset_name: config},
         img_height=IMG_SHAPE[0],
         img_width=IMG_SHAPE[1],
         batch_sz=BATCH_SIZE,
     )
-    pairs, labels = generator.generate_pairs()
+
+    pairs, labels = generator.generate_pairs_from_loaded(images, labels)
     labels = np.array(labels).astype(np.float32)
-    print(f"✅ Loaded {len(pairs)} pairs with labels.")
+
+    #print(f"✅ Loaded {len(pairs)} pairs with labels.")
     # Train/val split
     val_split = int(0.9 * len(pairs))
     train_pairs, val_pairs = pairs[:val_split], pairs[val_split:]
@@ -340,22 +452,21 @@ for dataset_name, config in datasets.items():
     train_time = time.time() - start_time
     # ========== Save Weights ==========
     os.makedirs(weights_dir, exist_ok=True)
-    # Optional but recommended: Load best weights from disk
 
     # Save final model weights (Siamese full model)
-    model.save_weights(os.path.join(weights_dir, f"{dataset_name}_siamese_model_f1.weights.h5"))
+    model.save_weights(os.path.join(weights_dir, f"{dataset_name}_clahe_siamese_model.weights.h5"))
 
     # Save only the base feature extractor (SigNet)
-    base_network.save_weights(os.path.join(weights_dir, f"{dataset_name}_signet_network_f1.weights.h5"))
+    base_network.save_weights(os.path.join(weights_dir, f"{dataset_name}_clahe_signet_network.weights.h5"))
 
     # Save entire model (architecture + weights)
-    model.save(f"{dataset_name}_model_f1.h5")
+    model.save(f"{dataset_name}_clahe_model.h5")
 
     print(f"✅ Saved all weights and model for {dataset_name}")
 
     # ========== Evaluation ==========
     # 1. Get test data
-    test_images, test_labels = generator.get_unbatched_data()
+    test_images, test_labels = generator.get_unbatched_data()    
     clean_imgs, clean_labels = test_images, test_labels  # Store clean versions for SOP3
     noisy_imgs, _ = generator.get_unbatched_data(noisy=True)
     noisy_imgs = np.array(noisy_imgs)
@@ -383,15 +494,14 @@ for dataset_name, config in datasets.items():
                 forged_d.append(dist)
 
     # Combine distances and labels
-    distances = genuine_d + forged_d
-    binary_labels = [1] * len(genuine_d) + [0] * len(forged_d)
+    distances = np.array(genuine_d + forged_d)
+    binary_labels = np.array([1] * len(genuine_d) + [0] * len(forged_d))
 
-    # Compute best threshold
-    best_threshold, best_f1 = compute_threshold_f1(np.array(distances), np.array(binary_labels))
-    preds_f1 = (np.array(distances) <= best_threshold).astype(int)
-    acc = accuracy_score(binary_labels, preds_f1)
+    # Compute ROC-based accuracy and best threshold
+    acc, best_threshold = compute_accuracy_roc(distances, binary_labels)
+    preds = (distances <= best_threshold).astype(int)
+    f1 = f1_score(binary_labels, preds)
 
-    #print(f"✅ Using F1-optimized threshold: {best_threshold:.4f} (F1 = {best_f1:.4f}, Accuracy = {acc:.4f})")
 
     # Diagnostic output
     print("\n=== Embedding Diagnostics ===")
@@ -420,7 +530,7 @@ for dataset_name, config in datasets.items():
         roc_far=sop1_metrics['SOP1_FAR'],
         roc_frr=sop1_metrics['SOP1_FRR'],
         dataset_name=dataset_name,
-        save_path=f"{dataset_name}_ROC_FAR_FRR_BarChart_f1.png"
+        save_path=f"{dataset_name}_ROC_FAR_FRR_BarChart.png"
     )
 
     # ========== SOP 2 Evaluation ==========
@@ -446,7 +556,7 @@ for dataset_name, config in datasets.items():
         sop3_metrics = {k: -1 for k in ['SOP3_Mean_PSNR', 'SOP3_Accuracy_Drop', 'SOP3_Mean_Shift', 'SOP3_Max_Shift']}
 
     # ========== Collect and Save Results ==========
-    f1 = f1_score(binary_labels, [1 if d <= best_threshold else 0 for d in distances])
+    
 
     results.append({
         "Dataset": dataset_name,
@@ -458,7 +568,7 @@ for dataset_name, config in datasets.items():
         "F1_Score": f1
     })
 
-    pd.DataFrame(results).to_csv("SigNet_Baseline_f1_SOP_Results.csv", index=False)
+    pd.DataFrame(results).to_csv("SigNet_Baseline_CLAHE_Results.csv", index=False)
     print(f"✅ Metrics saved for {dataset_name}")
 
     # ========== Visualization ==========
@@ -484,7 +594,7 @@ for dataset_name, config in datasets.items():
         plt.title("Noise-Induced Embedding Shifts")
 
     plt.tight_layout()
-    plt.savefig(f"{dataset_name}_f1_baseline_metrics.png")
+    plt.savefig(f"{dataset_name}_baseline_CLAHE_metrics.png")
     plt.close()
 
     # ====== Loss Curve Plot (Training vs Validation) ======
@@ -496,7 +606,7 @@ for dataset_name, config in datasets.items():
     plt.title(f'{dataset_name} Training Loss Curve (Contrastive Loss)')
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f"{dataset_name}_baseline_loss_curve.png")
+    plt.savefig(f"{dataset_name}_baseline_CLAHE_loss_curve.png")
     plt.close()
 
-print(f"📋 Finished evaluation for {dataset_name} f1. Current CSV updated.\n")
+print(f"📋 Finished evaluation for {dataset_name}. Current CSV updated.\n")

@@ -101,8 +101,8 @@ def apply_partial_clahe_per_writer(generator, images, labels, writer_ids, save_d
         imgs = images[mask]
         lbls = labels[mask]
 
-        genuine = imgs[lbls == 1]
-        forged = imgs[lbls == 0]
+        genuine = imgs[lbls == 0]
+        forged = imgs[lbls == 1]
 
         gen_idx = np.random.choice(len(genuine), size=len(genuine)//2, replace=False) if len(genuine) > 1 else []
         forg_idx = np.random.choice(len(forged), size=len(forged)//2, replace=False) if len(forged) > 1 else []
@@ -573,6 +573,44 @@ for dataset_name in datasets.keys():
 
     except Exception as e:
         print(f"❌ Failed to save metrics: {e}")
+    
+    # === Visualization: Distance, PCA, Shift ===
+    plt.figure(figsize=(15, 5))
+
+    # 1. Distance distribution (Genuine vs Forged)
+    plt.subplot(131)
+    plt.hist(genuine_d, bins=30, alpha=0.6, label='Genuine')
+    plt.hist(forged_d, bins=30, alpha=0.6, label='Forged')
+    plt.axvline(best_threshold, color='red', linestyle='--', label='Threshold')
+    plt.title(f"{dataset_name} Distance Distribution")
+    plt.xlabel("Euclidean Distance")
+    plt.ylabel("Frequency")
+    plt.legend()
+
+    # 2. PCA projection of embeddings (Colored by test labels)
+    plt.subplot(132)
+    from sklearn.decomposition import PCA
+    pca_emb = PCA(n_components=2).fit_transform(embeddings[:200])
+    plt.scatter(pca_emb[:, 0], pca_emb[:, 1], c=test_labels[:200], cmap='coolwarm', alpha=0.6)
+    plt.title(f"{dataset_name} PCA of Embeddings")
+    plt.xlabel("PCA-1")
+    plt.ylabel("PCA-2")
+
+    # 3. Noise-induced embedding shifts (SOP3)
+    if 'SOP3_Mean_Shift' in sop3_metrics and sop3_metrics['SOP3_Mean_Shift'] != -1:
+        shifts = np.linalg.norm(clean_emb - noisy_emb, axis=1)
+        plt.subplot(133)
+        plt.hist(shifts, bins=20, color='slateblue', alpha=0.7)
+        plt.title("Noise-Induced Embedding Shifts")
+        plt.xlabel("L2 Distance")
+        plt.ylabel("Frequency")
+
+    # Save the combined visualization
+    plt.tight_layout()
+    plt.savefig(f"{dataset_name}_ENHANCED_metrics_plots.png")
+    plt.close()
+    print(f"📊 Visualization saved to {dataset_name}_ENHANCED_metrics_plots.png")
+
     
     # --- Generate reference embeddings (once) ---
     try:

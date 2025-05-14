@@ -151,8 +151,10 @@ def evaluate_sop1(genuine_d, forged_d, binary_labels, distances, threshold):
     # ROC AUC and EER
     try:
         fpr, tpr, thresholds = roc_curve(binary_labels, distances)
-        eer_func = interp1d(fpr, tpr)
-        eer = brentq(lambda x: 1. - x - eer_func(x), 0., 1.)
+        fnr = 1 - tpr
+        eer_threshold_idx = np.argmin(np.abs(fpr - fnr))
+        eer = fpr[eer_threshold_idx]
+
         metrics['SOP1_EER'] = eer
         metrics['SOP1_AUC_ROC'] = roc_auc_score(binary_labels, -np.array(distances))  # Inverted for "genuine < forged"
     except Exception:
@@ -390,7 +392,6 @@ for dataset_name, config in datasets.items():
     acc, best_threshold = compute_accuracy_roc(distances, binary_labels)
     preds = (distances <= best_threshold).astype(int)
     f1 = f1_score(binary_labels, preds)
-
 
     # Diagnostic output
     print("\n=== Embedding Diagnostics ===")
