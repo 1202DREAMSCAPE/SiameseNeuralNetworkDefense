@@ -124,7 +124,7 @@ def plot_far_frr_bar_chart(roc_far, roc_frr, dataset_name='Dataset', save_path=N
     if save_path:
         plt.savefig(save_path)
 
-def apply_partial_clahe_per_writer(generator, images, labels, writer_ids, save_dir="clahe_samples"):
+def apply_partial_clahe_per_writer(generator, images, labels, writer_ids, save_dir="clahe_samples2"):
     os.makedirs(save_dir, exist_ok=True)
     processed = []
     sample_log = []
@@ -379,7 +379,7 @@ for dataset_name, config in datasets.items():
             images,
             class_labels,
             writer_ids,
-            save_dir=f"clahe_samples/{dataset_name}"
+            save_dir=f"clahe_samples2/{dataset_name}"
         )
 
         os.makedirs("clahe_data", exist_ok=True)

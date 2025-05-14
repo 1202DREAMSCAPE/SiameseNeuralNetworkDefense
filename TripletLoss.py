@@ -331,7 +331,6 @@ for dataset_name, config in datasets.items():
     binary_labels = np.array([1] * len(genuine_d) + [0] * len(forged_d))
 
     # Compute ROC-based accuracy and best threshold
-    # Compute ROC-based accuracy and best threshold
     acc, best_threshold = compute_accuracy_roc(distances, binary_labels)
     preds = (distances <= best_threshold).astype(int)
     f1 = f1_score(binary_labels, preds) 
@@ -349,7 +348,7 @@ for dataset_name, config in datasets.items():
     # 6. SOP 1: Metric calculations
     sop1_metrics = evaluate_sop1(genuine_d, forged_d, binary_labels, distances, best_threshold)
     sop1_metrics = add_extended_sop1_metrics(sop1_metrics, binary_labels, distances, best_threshold)
-    plot_far_frr_bar_chart(sop1_metrics['SOP1_FAR'], sop1_metrics['SOP1_FRR'], dataset_name, f"{dataset_name}_ROC_FAR_FRR_BarChart_f1.png")
+    plot_far_frr_bar_chart(sop1_metrics['SOP1_FAR'], sop1_metrics['SOP1_FRR'], dataset_name, f"{dataset_name}_ROC_FAR_FRR_BarChart_Triplet.png")
 
     # 7. SOP 2: Embedding clustering
     sop2_metrics = evaluate_sop2(embeddings, test_labels)
