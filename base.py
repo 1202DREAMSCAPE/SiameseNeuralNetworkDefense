@@ -393,6 +393,19 @@ for dataset_name, config in datasets.items():
     preds = (distances <= best_threshold).astype(int)
     f1 = f1_score(binary_labels, preds)
 
+    # ✅ Save Classification Report CSV
+    classification_df = pd.DataFrame({
+        "Index": np.arange(len(distances)),
+        "Distance": distances,
+        "True_Label": binary_labels,
+        "Predicted_Label": preds,
+        "Result": ["Correct" if t == p else "Incorrect" for t, p in zip(binary_labels, preds)]
+    })
+
+    csv_path = f"{dataset_name}_classification_report.csv"
+    classification_df.to_csv(csv_path, index=False)
+    print(f"📝 classification report saved to {csv_path}")
+
     # Diagnostic output
     print("\n=== Embedding Diagnostics ===")
     print(f"Genuine distances - Min: {np.min(genuine_d):.4f}, Max: {np.max(genuine_d):.4f}")

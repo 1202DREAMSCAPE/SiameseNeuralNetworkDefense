@@ -499,6 +499,12 @@ for dataset_name in datasets.keys():
     classification_df.to_csv(csv_path, index=False)
     print(f"📝 classification report saved to {csv_path}")
 
+     # Diagnostic output
+    print("\n=== Embedding Diagnostics ===")
+    print(f"Genuine distances - Min: {np.min(genuine_d):.4f}, Max: {np.max(genuine_d):.4f}")
+    print(f"Forged distances - Min: {np.min(forged_d):.4f}, Max: {np.max(forged_d):.4f}")
+
+
     # SOP1 Metrics
     sop1_metrics = evaluate_sop1(
         genuine_d=genuine_d,
