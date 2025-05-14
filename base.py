@@ -312,13 +312,6 @@ for dataset_name, config in datasets.items():
     distance = layers.Lambda(euclidean_distance)([base_network(input_a), base_network(input_b)])
     model = Model([input_a, input_b], distance)
     model.compile(optimizer=RMSprop(0.0001), loss=get_contrastive_loss(MARGIN))
-
-    # early_stopping = EarlyStopping(
-    #     monitor='val_loss',
-    #     patience=5, #gives out around 50% accuracy
-    #     restore_best_weights=True,
-    #     verbose=1
-    # )
     
     weights_dir = 'base_weights'
     metrics_dir = 'baseline_metrics'
@@ -338,7 +331,6 @@ for dataset_name, config in datasets.items():
         validation_data=([np.array(val_img1), np.array(val_img2)], np.array(val_labels)),
         batch_size=BATCH_SIZE,
         epochs=EPOCHS,
-       # callbacks=[early_stopping],
     )
     train_time = time.time() - start_time
     # ========== Save Weights ==========

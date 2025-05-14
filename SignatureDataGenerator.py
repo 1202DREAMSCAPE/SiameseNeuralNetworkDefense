@@ -402,8 +402,9 @@ class SignatureDataGenerator:
     def generate_hard_mined_triplets(self, base_network, batch_size=32):
         print("🔍 Generating hard-mined triplets ...")
 
+        # Triplet Loss is implemented following these steps:
+        # 1. For each writer in the training set:
         anchor_list, positive_list, negative_list = [], [], []
-
         all_images = []
         all_image_paths = []
         all_writer_ids = []
@@ -411,6 +412,8 @@ class SignatureDataGenerator:
         for dataset_path, writer in self.train_writers:
             if os.path.basename(dataset_path) != self.dataset_name:
                 continue
+
+            # 1.1. Collect all signature images (genuine and forged)
             for label_type in ['genuine', 'forged']:
                 img_dir = os.path.join(dataset_path, f"writer_{writer:03d}", label_type)
                 if not os.path.exists(img_dir): continue
@@ -422,54 +425,58 @@ class SignatureDataGenerator:
                     all_image_paths.append(img_path) 
                     all_writer_ids.append(writer)
 
+        # 1.2. Compute embeddings using the current base model
         all_images_np = np.array(all_images)
         all_embeddings_np = base_network.predict(all_images_np, batch_size=batch_size, verbose=0)
 
+        # Create mapping: writer → list of image indices
         writer_to_indices = {}
         for idx, writer in enumerate(all_writer_ids):
             writer_to_indices.setdefault(writer, []).append(idx)
 
+        # 2. For each pair of genuine images from the same writer:
         for writer, indices in writer_to_indices.items():
             if len(indices) < 2:
                 continue
 
             for i in range(len(indices) - 1):
+                # 2.1. Set anchor and positive as consecutive genuine images
                 anchor_idx = indices[i]
                 positive_idx = indices[i + 1]
-
                 anchor_emb = all_embeddings_np[anchor_idx]
 
-                # Brute-force: find hardest negative
+                # 2.2. Search the entire dataset for the hardest negative
                 min_dist = float('inf')
                 hardest_neg_idx = None
 
                 for j, other_emb in enumerate(all_embeddings_np):
-                    if all_writer_ids[j] != writer:
-                        dist = np.linalg.norm(anchor_emb - other_emb)
+                    if all_writer_ids[j] != writer:  # 2.2.1. Only consider different writers
+                        dist = np.linalg.norm(anchor_emb - other_emb)  # Compute L2 distance
                         if dist < min_dist:
                             min_dist = dist
-                            hardest_neg_idx = j
+                            hardest_neg_idx = j  # 2.2.2. Keep the one with the smallest distance
 
                 if hardest_neg_idx is not None:
+                    # 3. Form a triplet: (anchor, positive, hardest negative)
                     anchor_list.append(all_images[anchor_idx])
                     positive_list.append(all_images[positive_idx])
                     negative_list.append(all_images[hardest_neg_idx])
 
-                # 📝 Log the triplet
-                anchor_path = all_image_paths[anchor_idx]
-                positive_path = all_image_paths[positive_idx]
-                negative_path = all_image_paths[hardest_neg_idx]
-                negative_writer = all_writer_ids[hardest_neg_idx]
+                    # 📝 4. Log the triplet for traceability
+                    anchor_path = all_image_paths[anchor_idx]
+                    positive_path = all_image_paths[positive_idx]
+                    negative_path = all_image_paths[hardest_neg_idx]
+                    negative_writer = all_writer_ids[hardest_neg_idx]
 
-                # Determine label type by path
-                if "genuine" in negative_path.lower():
-                    neg_label = "Genuine"
-                elif "forged" in negative_path.lower():
-                    neg_label = "Forged"
-                else:
-                    neg_label = "Unknown"
+                    # Determine label type for logging
+                    if "genuine" in negative_path.lower():
+                        neg_label = "Genuine"
+                    elif "forged" in negative_path.lower():
+                        neg_label = "Forged"
+                    else:
+                        neg_label = "Unknown"
 
-                self.log_triplet(writer, anchor_path, positive_path, negative_writer, negative_path, neg_label)
+                    self.log_triplet(writer, anchor_path, positive_path, negative_writer, negative_path, neg_label)
 
         print(f"✅ Total hard-mined triplets: {len(anchor_list)}")
         return anchor_list, positive_list, negative_list
@@ -521,23 +528,38 @@ class SignatureDataGenerator:
         Normalizes the output to [-1, 1].
         """
         try:
+            # Check if the image is normalized (float [0,1]) and convert to uint8 [0,255] if needed
             if img_array.dtype != np.uint8:
-                img_array = (img_array * 255).astype(np.uint8)  # If normalized
+                img_array = (img_array * 255).astype(np.uint8)
 
+            # Resize image to match input size requirements
             img = cv2.resize(img_array, (self.img_width, self.img_height))
+
+            # convert RGB image to LAB color space
             lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+
+            # split LAB into separate channels
             l, a, b = cv2.split(lab)
+
+            # Apply CLAHE to the L (lightness) channel to locally enhance contrast
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             cl = clahe.apply(l)
+
+            # Merge the enhanced L channel back with original A and B, convert back to RGB
             merged = cv2.merge((cl, a, b))
             img = cv2.cvtColor(merged, cv2.COLOR_LAB2RGB)
 
+            # Normalize pixel values from [0, 255] to [-1, 1] for model input
             img = img.astype(np.float32) / 255.0
             img = (img - 0.5) / 0.5
+
             return img
+
         except Exception as e:
+            # Handle errors gracefully and return a black image of expected shape
             print(f"⚠ Error in preprocess_image_from_array: {e}")
             return np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
+
 
     def generate_pairs_from_loaded(self, images, labels):
         """

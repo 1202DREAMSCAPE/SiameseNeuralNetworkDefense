@@ -92,18 +92,20 @@ def compute_far_frr(y_true, y_pred):
     return far, frr
 
 def apply_partial_clahe_per_writer(generator, images, labels, writer_ids, save_dir="clahe_samples"):
-    os.makedirs(save_dir, exist_ok=True)
-    processed = []
-    sample_log = []
+    os.makedirs(save_dir, exist_ok=True)  # Ensure save directory exists
+    processed = []  # To store all processed images
+    sample_log = []  # To record paths of saved CLAHE comparison images
 
-    for wid in np.unique(writer_ids):
-        mask = (writer_ids == wid)
-        imgs = images[mask]
-        lbls = labels[mask]
+    for wid in np.unique(writer_ids):  # Iterate over each unique writer ID
+        mask = (writer_ids == wid)  # Select images for current writer
+        # Filter the images and labels corresponding only to the current writer ID
+        imgs = images[mask]  # Select all images belonging to the current writer (based on writer_ids mask)
+        lbls = labels[mask]  # Select the corresponding labels (0 for genuine, 1 for forged) for those images
 
-        genuine = imgs[lbls == 0]
-        forged = imgs[lbls == 1]
+        genuine = imgs[lbls == 0]  # Extract genuine signatures
+        forged = imgs[lbls == 1]  # Extract forged signatures
 
+        # Randomly choose 50% of each class to apply CLAHE
         gen_idx = np.random.choice(len(genuine), size=len(genuine)//2, replace=False) if len(genuine) > 1 else []
         forg_idx = np.random.choice(len(forged), size=len(forged)//2, replace=False) if len(forged) > 1 else []
 
@@ -111,20 +113,22 @@ def apply_partial_clahe_per_writer(generator, images, labels, writer_ids, save_d
         for i in range(len(genuine)):
             raw_img = genuine[i]
             if i in gen_idx:
-                clahe_img = generator.preprocess_image_from_array(raw_img)
+                # Apply CLAHE preprocessing to selected genuine image
+                clahe_img = generator.preprocess_image_from_array(raw_img) 
                 gen_processed.append(clahe_img)
 
-                # Save one sample
+                # Save one example per writer/class for visual comparison
                 if i < 1:
                     path = save_clahe_comparison(raw_img, clahe_img, save_dir, wid, "genuine")
                     sample_log.append([wid, "genuine", path])
             else:
-                gen_processed.append(raw_img)
+                gen_processed.append(raw_img)  # Leave some images unprocessed
 
         forg_processed = []
         for i in range(len(forged)):
             raw_img = forged[i]
             if i in forg_idx:
+                # Step 1–4: Apply CLAHE preprocessing to selected forged image
                 clahe_img = generator.preprocess_image_from_array(raw_img)
                 forg_processed.append(clahe_img)
 
@@ -134,9 +138,10 @@ def apply_partial_clahe_per_writer(generator, images, labels, writer_ids, save_d
             else:
                 forg_processed.append(raw_img)
 
+        # Append processed images for current writer to overall list
         processed.extend(gen_processed + forg_processed)
 
-    # Save CSV log
+    # Save sample comparison log as CSV
     log_path = os.path.join(save_dir, "sample_log.csv")
     with open(log_path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -144,7 +149,8 @@ def apply_partial_clahe_per_writer(generator, images, labels, writer_ids, save_d
         writer.writerows(sample_log)
 
     print(f"📝 CLAHE sample log saved to: {log_path}")
-    return np.array(processed)
+    return np.array(processed)  # Return all processed images
+
 
 def save_clahe_comparison(raw_img, clahe_img, base_dir, writer_id, label):
     # De-normalize if image is in [-1, 1]
@@ -389,12 +395,13 @@ for dataset_name, dataset_config in datasets.items():
 for dataset_name in datasets.keys():
     print(f"\n--- Training Triplet Model for {dataset_name} ---")
     try:
-        # Load preprocessed CLAHE-enhanced data
+        # load preprocessed CLAHE-enhanced image data, labels (0 = genuine, 1 = forged), and writer IDs
         images = np.load(f"clahe_data/{dataset_name}_X.npy")
         labels = np.load(f"clahe_data/{dataset_name}_y.npy")
         writer_ids = np.load(f"clahe_data/{dataset_name}_writer_ids.npy")
 
-        # Rebuild generator (for later use like test data, not triplet mining)
+        # rebuild the sdg to reuse test loaders and triplet generation tools
+        
         dataset_config = datasets[dataset_name]
         generator = SignatureDataGenerator(
             dataset={dataset_name: dataset_config},
@@ -403,43 +410,62 @@ for dataset_name in datasets.keys():
             batch_sz=BATCH_SIZE,
         )
 
-        # Create base network
+        '''
+        generate training data using the current base network
+        embed all training images, compute L2 distances between anchor embeddings and all other embeddings,
+        then hard mine
+        '''
+
+        # create base network using the SigNet architecture
         base_network = create_base_network_signet(IMG_SHAPE, embedding_dim=EMBEDDING_SIZE)
 
-        # ✅ Generate triplets using CLAHE-enhanced images
+        # generate triplets using hnm
         anchor_list, positive_list, negative_list = generator.generate_hard_mined_triplets(
-        base_network=base_network,
-        batch_size=BATCH_SIZE
+            base_network=base_network,
+            batch_size=BATCH_SIZE
         )
 
         if len(anchor_list) == 0:
             print("⚠ No triplets generated. Skipping training.")
             continue
 
-        # Convert lists to numpy arrays
+        # Convert the list of triplets into NumPy arrays for training
         anc = np.array(anchor_list)
         pos = np.array(positive_list)
         neg = np.array(negative_list)
 
-        # Prepare training data
+        # prepare the triplet training dataset using tf API
+        # The dummy label (zeros) is required for Keras training 
         train_data = tf.data.Dataset.from_tensor_slices(
             ({"input_anchor": anc, "input_positive": pos, "input_negative": neg}, np.zeros(len(anc)))
         ).batch(BATCH_SIZE, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
-        # Build and train model
+        # Build the full triplet network using the base network as shared backbone
         triplet_model = create_triplet_network_from_existing_base(base_network)
+
+        # compile the model with Triplet Loss (uses margin to separate anchor–negative pairs)
         triplet_model.compile(optimizer=RMSprop(learning_rate=0.001), loss=get_triplet_loss(margin=MARGIN))
 
         early_stop = EarlyStopping(monitor='loss', patience=5, restore_best_weights=True, verbose=1)
 
         print("🚀 Training started...")
-        history = triplet_model.fit(train_data, epochs=EPOCHS, verbose=1, callbacks=[early_stop])
+        history = triplet_model.fit(
+            train_data, 
+            epochs=EPOCHS, 
+            verbose=1, 
+            callbacks=[early_stop])
 
-        # Save model weights
+        # base network weights (embedding extractor) for future embedding generation
         base_network.save_weights(f"{dataset_name}_ENHANCED_base_network.weights.h5")
 
-        # Save entire model (architecture + weights)
+        # full triplet model (base + 3-input head) including architecture and weights
         triplet_model.save(f"{dataset_name}_ENHANCED_triplet_model.h5")
+
+    except Exception as e:
+        # 🔴 Log errors and continue to the next dataset if something fails
+        print(f"❌ Training failed for {dataset_name}")
+        traceback.print_exc()
+        continue
 
 
     except Exception as e:
